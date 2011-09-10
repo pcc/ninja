@@ -270,16 +270,31 @@ void Plan::NodeFinished(Node* node) {
        i != node->out_edges_.end(); ++i) {
     if (want_.find(*i) != want_.end()) {
       // See if the edge is now ready.
-      bool ready = true;
-      for (vector<Node*>::iterator j = (*i)->inputs_.begin();
-           j != (*i)->inputs_.end(); ++j) {
-        if ((*j)->dirty()) {
-          ready = false;
-          break;
-        }
-      }
-      if (ready)
+      if (find_if((*i)->inputs_.begin(), (*i)->inputs_.end(),
+                  mem_fun(&Node::dirty)) == (*i)->inputs_.end())
         ready_.insert(*i);
+    }
+  }
+}
+
+void Plan::CleanInput(BuildLog* build_log, Node* input) {
+  set<Edge*> touched_edges;
+  for (vector<Edge*>::iterator i = input->out_edges_.begin();
+       i != input->out_edges_.end(); ++i)
+    (*i)->CleanInput(build_log, input, &touched_edges);
+
+  for (set<Edge*>::iterator i = touched_edges.begin();
+       i != touched_edges.end(); ++i) {
+    if (find_if((*i)->inputs_.begin(), (*i)->inputs_.end(),
+                mem_fun(&Node::dirty)) == (*i)->inputs_.end()) {
+      if (find_if((*i)->outputs_.begin(), (*i)->outputs_.end(),
+                  mem_fun(&Node::dirty)) != (*i)->outputs_.end()) {
+        if (want_.count(*i))
+          ready_.insert(*i);
+      } else {
+        if (want_.erase(*i) && !(*i)->is_phony())
+          --command_edges_;
+      }
     }
   }
 }
@@ -501,6 +516,14 @@ void Builder::FinishEdge(Edge* edge, bool success, const string& output) {
     for (vector<Node*>::iterator i = edge->outputs_.begin();
          i != edge->outputs_.end(); ++i) {
       (*i)->dirty_ = false;
+      if (edge->rule_->restat_ && (*i)->file_->exists()) {
+        time_t new_mtime = disk_interface_->Stat((*i)->file_->path_);
+        if ((*i)->file_->mtime_ == new_mtime) {
+          // The rule command did not change the file.  Propagate the clean
+          // state through the build graph.
+          plan_.CleanInput(log_, *i);
+        }
+      }
     }
     plan_.EdgeFinished(edge);
   }
@@ -509,6 +532,7 @@ void Builder::FinishEdge(Edge* edge, bool success, const string& output) {
     return;
 
   int start_time, end_time;
+  status_->PlanHasTotalEdges(plan_.command_edge_count());
   status_->BuildEdgeFinished(edge, success, output, &start_time, &end_time);
   if (success && log_)
     log_->RecordCommand(edge, start_time, end_time);

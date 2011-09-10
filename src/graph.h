@@ -17,6 +17,7 @@
 
 #include <string>
 #include <vector>
+#include <set>
 using namespace std;
 
 #include "eval_env.h"
@@ -83,15 +84,21 @@ struct Rule {
   EvalString command_;
   EvalString description_;
   EvalString depfile_;
+  bool restat_;
 };
 
 struct State;
 
 /// An edge in the dependency graph; links between Nodes using Rules.
 struct Edge {
-  Edge() : rule_(NULL), env_(NULL), implicit_deps_(0), order_only_deps_(0) {}
+  Edge() : rule_(NULL), env_(NULL), num_dirty_inputs_(0), implicit_deps_(0),
+           order_only_deps_(0) {}
 
   bool RecomputeDirty(State* state, DiskInterface* disk_interface, string* err);
+  bool IsOutputDirty(struct BuildLog* build_log, time_t most_recent_input,
+                     const string& command, Node* output);
+  void CleanInput(struct BuildLog* build_log, Node* input,
+                  set<Edge*>* touched_edges);
   string EvaluateCommand();  // XXX move to env, take env ptr
   string GetDescription();
   bool LoadDepFile(State* state, DiskInterface* disk_interface, string* err);
@@ -102,6 +109,7 @@ struct Edge {
   vector<Node*> inputs_;
   vector<Node*> outputs_;
   Env* env_;
+  unsigned num_dirty_inputs_;
 
   // XXX There are three types of inputs.
   // 1) explicit deps, which show up as $in on the command line;

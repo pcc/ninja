@@ -50,6 +50,8 @@ struct Plan {
   /// tests.
   void EdgeFinished(Edge* edge);
 
+  void CleanInput(struct BuildLog* build_log, Node* input);
+
   /// Number of edges with commands to run.
   int command_edge_count() const { return command_edges_; }
 

@@ -30,7 +30,7 @@ bool FileStat::Stat(DiskInterface* disk_interface) {
 
 bool Edge::RecomputeDirty(State* state, DiskInterface* disk_interface,
                           string* err) {
-  bool dirty = false;
+  num_dirty_inputs_ = 0;
 
   if (!rule_->depfile_.empty()) {
     if (!LoadDepFile(state, disk_interface, err))
@@ -52,14 +52,14 @@ bool Edge::RecomputeDirty(State* state, DiskInterface* disk_interface,
     if (is_order_only(i - inputs_.begin())) {
       // Order-only deps only make us dirty if they're missing.
       if (!(*i)->file_->exists())
-        dirty = true;
+        num_dirty_inputs_++;
       continue;
     }
 
     // If a regular input is dirty (or missing), we're dirty.
     // Otherwise consider mtime.
     if ((*i)->dirty_) {
-      dirty = true;
+      num_dirty_inputs_++;
     } else {
       if ((*i)->file_->mtime_ > most_recent_input)
         most_recent_input = (*i)->file_->mtime_;
@@ -75,30 +75,73 @@ bool Edge::RecomputeDirty(State* state, DiskInterface* disk_interface,
     // visited their dependents.
     (*i)->file_->StatIfNecessary(disk_interface);
 
-    if (is_phony()) {
-      // Phony edges don't write any output.
-      // They're only dirty if an input is dirty.
-      if (dirty)
-        (*i)->dirty_ = true;
-      continue;
-    }
-
-    // Output is dirty if we're dirty, we're missing the output,
-    // or if it's older than the most recent input mtime.
-    if (dirty || !(*i)->file_->exists() ||
-        (*i)->file_->mtime_ < most_recent_input) {
-      (*i)->dirty_ = true;
-    } else {
-      // May also be dirty due to the command changing since the last build.
-      BuildLog::LogEntry* entry;
-      if (state->build_log_ &&
-          (entry = state->build_log_->LookupByOutput((*i)->file_->path_))) {
-        if (command != entry->command)
-          (*i)->dirty_ = true;
-      }
-    }
+    (*i)->dirty_ = IsOutputDirty(state ? state->build_log_ : 0, most_recent_input,
+                                 command, *i);
   }
   return true;
+}
+
+bool Edge::IsOutputDirty(BuildLog* build_log, time_t most_recent_input,
+                         const string& command, Node* output) {
+  if (is_phony()) {
+    // Phony edges don't write any output.
+    // They're only dirty if an input is dirty.
+    return num_dirty_inputs_ > 0;
+  }
+
+  // Output is dirty if we're dirty, we're missing the output,
+  // or if it's older than the most recent input mtime.
+  if (num_dirty_inputs_ > 0 || !output->file_->exists() ||
+      output->file_->mtime_ < most_recent_input) {
+    return true;
+  } else {
+    // May also be dirty due to the command changing since the last build.
+    BuildLog::LogEntry* entry;
+    if (build_log &&
+        (entry = build_log->LookupByOutput(output->file_->path_))) {
+      if (command != entry->command)
+        return true;
+    }
+  }
+  return false;
+}
+
+void Edge::CleanInput(BuildLog* build_log, Node* input,
+                      set<Edge*>* touched_edges) {
+  if (!outputs_[0]->file_->status_known())
+    return;
+
+  size_t non_order_only_count =
+    count(inputs_.begin(), inputs_.end() - order_only_deps_, input);
+  if (non_order_only_count == 0)
+    // This is an order-only dependency.  If we reach this point, the dependency
+    // must have existed at the start.
+    return;
+
+  touched_edges->insert(this);
+  num_dirty_inputs_ -= non_order_only_count;
+  if (num_dirty_inputs_ > 0)
+    return;
+
+  time_t most_recent_input = 1;
+  for (vector<Node*>::iterator i = inputs_.begin(); i != inputs_.end(); ++i) {
+    if ((*i)->file_->mtime_ > most_recent_input)
+      most_recent_input = (*i)->file_->mtime_;
+  }
+
+  string command = EvaluateCommand();
+
+  for (vector<Node*>::iterator i = outputs_.begin(); i != outputs_.end(); ++i) {
+    if (!(*i)->dirty_)
+      continue;
+
+    if (!IsOutputDirty(build_log, most_recent_input, command, *i)) {
+      (*i)->dirty_ = false;
+      for (vector<Edge*>::iterator ei = (*i)->out_edges_.begin();
+           ei != (*i)->out_edges_.end(); ++ei)
+        (*ei)->CleanInput(build_log, *i, touched_edges);
+    }
+  }
 }
 
 /// An Env for an Edge, providing $in and $out.
