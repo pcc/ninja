@@ -107,10 +107,10 @@ struct EdgeEnv : public Env {
   virtual string LookupVariable(const string& var) {
     string result;
     if (var == "in") {
-      int explicit_deps = edge_->inputs_.size() - edge_->implicit_deps_ -
-          edge_->order_only_deps_;
-      for (vector<Node*>::iterator i = edge_->inputs_.begin();
-           i != edge_->inputs_.end() && explicit_deps; ++i, --explicit_deps) {
+      // Iterate through explicit deps only.
+      for (vector<Node*>::iterator i = edge_->inputs_.begin(),
+           e = edge_->inputs_.end() - edge_->implicit_deps_ -
+               edge_->order_only_deps_; i != e; ++i) {
         if (!result.empty())
           result.push_back(' ');
         result.append((*i)->file_->path_);
