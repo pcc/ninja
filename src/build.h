@@ -58,6 +58,7 @@ struct Plan {
 private:
   bool AddSubTarget(Node* node, vector<Node*>* stack, string* err);
   bool CheckDependencyCycle(Node* node, vector<Node*>* stack, string* err);
+  void MaybeAddEdgeToReady(Edge* edge);
   void NodeFinished(Node* node);
 
   set<Edge*> want_;

@@ -110,6 +110,7 @@ void Edge::CleanInput(BuildLog* build_log, Node* input,
                       set<Edge*>* touched_edges) {
   if (!outputs_[0]->file_->status_known())
     return;
+  touched_edges->insert(this);
 
   size_t non_order_only_count =
     count(inputs_.begin(), inputs_.end() - order_only_deps_, input);
@@ -118,13 +119,12 @@ void Edge::CleanInput(BuildLog* build_log, Node* input,
     // must have existed at the start.
     return;
 
-  touched_edges->insert(this);
   num_dirty_inputs_ -= non_order_only_count;
   if (num_dirty_inputs_ > 0)
     return;
 
   time_t most_recent_input = 1;
-  for (vector<Node*>::iterator i = inputs_.begin(); i != inputs_.end(); ++i) {
+  for (vector<Node*>::iterator i = inputs_.begin(); i != inputs_.end() - order_only_deps_; ++i) {
     if ((*i)->file_->mtime_ > most_recent_input)
       most_recent_input = (*i)->file_->mtime_;
   }
@@ -137,8 +137,9 @@ void Edge::CleanInput(BuildLog* build_log, Node* input,
 
     if (!IsOutputDirty(build_log, most_recent_input, command, *i)) {
       (*i)->dirty_ = false;
-      for (vector<Edge*>::iterator ei = (*i)->out_edges_.begin();
-           ei != (*i)->out_edges_.end(); ++ei)
+      set<Edge*> out_edges((*i)->out_edges_.begin(), (*i)->out_edges_.end());
+      for (set<Edge*>::iterator ei = out_edges.begin();
+           ei != out_edges.end(); ++ei)
         (*ei)->CleanInput(build_log, *i, touched_edges);
     }
   }

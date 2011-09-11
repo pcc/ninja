@@ -264,37 +264,40 @@ void Plan::EdgeFinished(Edge* edge) {
   }
 }
 
+void Plan::MaybeAddEdgeToReady(Edge* edge) {
+  if (want_.count(edge)) {
+    // See if the edge is now ready.
+    if (find_if(edge->inputs_.begin(), edge->inputs_.end(),
+                mem_fun(&Node::dirty)) == edge->inputs_.end())
+      ready_.insert(edge);
+  }
+}
+
 void Plan::NodeFinished(Node* node) {
   // See if we we want any edges from this node.
   for (vector<Edge*>::iterator i = node->out_edges_.begin();
-       i != node->out_edges_.end(); ++i) {
-    if (want_.find(*i) != want_.end()) {
-      // See if the edge is now ready.
-      if (find_if((*i)->inputs_.begin(), (*i)->inputs_.end(),
-                  mem_fun(&Node::dirty)) == (*i)->inputs_.end())
-        ready_.insert(*i);
-    }
-  }
+       i != node->out_edges_.end(); ++i)
+    MaybeAddEdgeToReady(*i);
 }
 
 void Plan::CleanInput(BuildLog* build_log, Node* input) {
   set<Edge*> touched_edges;
-  for (vector<Edge*>::iterator i = input->out_edges_.begin();
-       i != input->out_edges_.end(); ++i)
+  set<Edge*> out_edges(input->out_edges_.begin(), input->out_edges_.end());
+
+  for (set<Edge*>::iterator i = out_edges.begin();
+       i != out_edges.end(); ++i)
     (*i)->CleanInput(build_log, input, &touched_edges);
 
+  // Test all edges we touched to see if we can remove them from the
+  // build graph or if they are now ready to execute.
   for (set<Edge*>::iterator i = touched_edges.begin();
        i != touched_edges.end(); ++i) {
-    if (find_if((*i)->inputs_.begin(), (*i)->inputs_.end(),
-                mem_fun(&Node::dirty)) == (*i)->inputs_.end()) {
-      if (find_if((*i)->outputs_.begin(), (*i)->outputs_.end(),
-                  mem_fun(&Node::dirty)) != (*i)->outputs_.end()) {
-        if (want_.count(*i))
-          ready_.insert(*i);
-      } else {
-        if (want_.erase(*i) && !(*i)->is_phony())
-          --command_edges_;
-      }
+    if (find_if((*i)->outputs_.begin(), (*i)->outputs_.end(),
+                mem_fun(&Node::dirty)) == (*i)->outputs_.end()) {
+      if (want_.erase(*i) && !(*i)->is_phony())
+        --command_edges_;
+    } else {
+      MaybeAddEdgeToReady(*i);
     }
   }
 }
