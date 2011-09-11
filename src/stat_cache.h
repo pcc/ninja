@@ -29,7 +29,7 @@ struct StatCache {
 
   /// Dump the mapping to stdout (useful for debugging).
   void Dump();
-  void Reload();
+  void Invalidate();
 
   struct Key {
     Key() : path(NULL) {}
