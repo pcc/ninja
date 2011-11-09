@@ -19,11 +19,13 @@
 #include "graph.h"
 
 FileStat* StatCache::GetFile(const std::string& path) {
-  Paths::iterator i = paths_.find(path.c_str());
-  if (i != paths_.end())
-    return i->second;
+  std::pair<Paths::iterator, bool> i =
+    paths_.insert(std::make_pair(path.c_str(), (FileStat *) 0));
+  if (!i.second)
+    return i.first->second;
   FileStat* file = new FileStat(path);
-  paths_[file->path_.c_str()] = file;
+  const_cast<const char *&>(i.first->first) = file->path_.c_str();
+  i.first->second = file;
   return file;
 }
 
