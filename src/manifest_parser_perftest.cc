@@ -101,7 +101,7 @@ int main(int argc, char* argv[]) {
   if (chdir(kManifestDir) < 0)
     Fatal("chdir: %s", strerror(errno));
 
-  const int kNumRepetitions = 5;
+  const int kNumRepetitions = 25;
   vector<int> times;
   for (int i = 0; i < kNumRepetitions; ++i) {
     int64_t start = GetTimeMillis();

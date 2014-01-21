@@ -296,6 +296,8 @@ if platform.is_windows():
     objs += cc('getopt')
 else:
     objs += cxx('subprocess-posix')
+if platform.is_linux():
+    objs += cxx('watcher-linux')
 if platform.is_msvc():
     ninja_lib = n.build(built('ninja.lib'), 'ar', objs)
 else:
@@ -306,6 +308,7 @@ if platform.is_msvc():
     libs.append('ninja.lib')
 else:
     libs.append('-lninja')
+    libs.append('-lrt')
 
 all_targets = []
 
@@ -391,6 +394,9 @@ all_targets += n.build(binary('hash_collision_bench'), 'link', objs,
                               implicit=ninja_lib, variables=[('libs', libs)])
 objs = cxx('manifest_parser_perftest')
 all_targets += n.build(binary('manifest_parser_perftest'), 'link', objs,
+                              implicit=ninja_lib, variables=[('libs', libs)])
+objs = cxx('watcher_test')
+all_targets += n.build(binary('watcher_test'), 'link', objs,
                               implicit=ninja_lib, variables=[('libs', libs)])
 n.newline()
 

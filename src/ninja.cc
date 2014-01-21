@@ -70,7 +70,10 @@ struct Options {
 /// to poke into these, so store them as fields on an object.
 struct NinjaMain : public BuildLogUser {
   NinjaMain(const char* ninja_command, const BuildConfig& config) :
-      ninja_command_(ninja_command), config_(config) {}
+      ninja_command_(ninja_command), config_(config) {
+    if (config_.continuous)
+      disk_interface_.CreateWatcher();
+  }
 
   /// Command line used to run Ninja.
   const char* ninja_command_;
@@ -196,6 +199,7 @@ void Usage(const BuildConfig& config) {
 "  -k N     keep going until N jobs fail [default=1]\n"
 "  -n       dry run (don't run commands but act like they succeeded)\n"
 "  -v       show all command lines while building\n"
+"  -c       continuous build\n"
 "\n"
 "  -d MODE  enable debugging (use -d list to list modes)\n"
 "  -t TOOL  run a subtool (use -t list to list subtools)\n"
@@ -907,7 +911,7 @@ int NinjaMain::RunBuild(int argc, char** argv) {
   // Make sure restat rules do not see stale timestamps.
   disk_interface_.AllowStatCache(false);
 
-  if (builder.AlreadyUpToDate()) {
+  if (!config_.continuous && builder.AlreadyUpToDate()) {
     printf("ninja: no work to do.\n");
     return 0;
   }
@@ -961,7 +965,7 @@ int ReadFlags(int* argc, char*** argv,
 
   int opt;
   while (!options->tool &&
-         (opt = getopt_long(*argc, *argv, "d:f:j:k:l:nt:vC:h", kLongOptions,
+         (opt = getopt_long(*argc, *argv, "d:f:j:k:l:nt:vcC:h", kLongOptions,
                             NULL)) != -1) {
     switch (opt) {
       case 'd':
@@ -1009,6 +1013,9 @@ int ReadFlags(int* argc, char*** argv,
         break;
       case 'v':
         config->verbosity = BuildConfig::VERBOSE;
+        break;
+      case 'c':
+        config->continuous = true;
         break;
       case 'C':
         options->working_dir = optarg;

@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <functional>
+#include <iostream>
 
 #if defined(__SVR4) && defined(__sun)
 #include <sys/termios.h>
@@ -89,6 +90,12 @@ BuildStatus::BuildStatus(const BuildConfig& config)
 
 void BuildStatus::PlanHasTotalEdges(int total) {
   total_edges_ = total;
+}
+
+void BuildStatus::PlanWasRebuilt() {
+  started_edges_ = finished_edges_ = 0;
+  running_edges_.clear();
+  printer_.SetConsoleLocked(false);
 }
 
 void BuildStatus::BuildEdgeStarted(Edge* edge) {
@@ -258,9 +265,14 @@ void BuildStatus::PrintStatus(Edge* edge) {
                  force_full_command ? LinePrinter::FULL : LinePrinter::ELIDE);
 }
 
+void BuildStatus::BuildIdle(string status) {
+  printer_.Print("[idle] " + status, LinePrinter::ELIDE);
+}
+
 Plan::Plan() : command_edges_(0), wanted_edges_(0) {}
 
 bool Plan::AddTarget(Node* node, string* err) {
+  root_targets_.push_back(node);
   vector<Node*> stack;
   return AddSubTarget(node, &stack, err);
 }
@@ -274,15 +286,16 @@ bool Plan::AddSubTarget(Node* node, vector<Node*>* stack, string* err) {
         referenced = ", needed by '" + stack->back()->path() + "',";
       *err = "'" + node->path() + "'" + referenced + " missing "
              "and no known rule to make it";
+      return false;
     }
-    return false;
+    return true;
   }
 
   if (CheckDependencyCycle(node, stack, err))
     return false;
 
   if (edge->outputs_ready())
-    return false;  // Don't need to do anything.
+    return true;  // Don't need to do anything.
 
   // If an entry in want_ does not already exist for edge, create an entry which
   // maps to false, indicating that we do not want to build this entry itself.
@@ -312,6 +325,31 @@ bool Plan::AddSubTarget(Node* node, vector<Node*>* stack, string* err) {
   }
   assert(stack->back() == node);
   stack->pop_back();
+
+  return true;
+}
+
+bool Plan::Rebuild(string* err) {
+  want_.clear();
+  ready_.clear();
+  wanted_edges_ = 0;
+  command_edges_ = 0;
+
+  err->clear();
+  for (vector<Node*>::iterator i = root_targets_.begin();
+       i != root_targets_.end(); ++i) {
+    vector<Node*> stack;
+    if (!AddSubTarget(*i, &stack, err)) {
+      return false;
+    }
+  }
+
+  if (g_explaining) {
+    puts("ninja explain: nodes in ready set:");
+    for (set<Edge*>::iterator i = ready_.begin(); i != ready_.end(); ++i) {
+      printf("ninja explain:  %s\n", (*(*i)->outputs_.begin())->path().c_str());
+    }
+  }
 
   return true;
 }
@@ -462,7 +500,10 @@ void Plan::Dump() {
 }
 
 struct RealCommandRunner : public CommandRunner {
-  explicit RealCommandRunner(const BuildConfig& config) : config_(config) {}
+  explicit RealCommandRunner(const BuildConfig& config, Watcher* watcher)
+      : config_(config) {
+    subprocs_.watcher_ = watcher;
+  }
   virtual ~RealCommandRunner() {}
   virtual bool CanRunMore();
   virtual bool StartCommand(Edge* edge);
@@ -485,6 +526,7 @@ vector<Edge*> RealCommandRunner::GetActiveEdges() {
 
 void RealCommandRunner::Abort() {
   subprocs_.Clear();
+  subproc_to_edge_.clear();
 }
 
 bool RealCommandRunner::CanRunMore() {
@@ -505,10 +547,16 @@ bool RealCommandRunner::StartCommand(Edge* edge) {
 
 bool RealCommandRunner::WaitForCommand(Result* result) {
   Subprocess* subproc;
-  while ((subproc = subprocs_.NextFinished()) == NULL) {
+  while ((subproc = subprocs_.NextFinished()) == NULL &&
+         (!subprocs_.watcher_ || !subprocs_.watcher_->Pending())) {
     bool interrupted = subprocs_.DoWork();
     if (interrupted)
       return false;
+  }
+
+  if (subprocs_.watcher_ && subprocs_.watcher_->Pending()) {
+    result->watcher = subprocs_.watcher_;
+    return true;
   }
 
   result->status = subproc->Finish();
@@ -578,8 +626,6 @@ bool Builder::AddTarget(Node* node, string* err) {
   if (Edge* in_edge = node->in_edge()) {
     if (!scan_.RecomputeDirty(in_edge, err))
       return false;
-    if (in_edge->outputs_ready())
-      return true;  // Nothing to do.
   }
 
   if (!plan_.AddTarget(node, err))
@@ -592,20 +638,128 @@ bool Builder::AlreadyUpToDate() const {
   return !plan_.more_to_do();
 }
 
+void Builder::TouchNode(Node* node, bool dirty) {
+  map<Node *, bool> visited;
+  TouchSubNode(node, dirty, &visited);
+}
+
+void Builder::TouchSubNode(Node* node, bool dirty, map<Node*, bool>* visited) {
+  if (!node->status_known())
+    return;
+
+  pair<map<Node*, bool>::iterator, bool> visited_ins =
+      visited->insert(make_pair(node, dirty));
+  if (!visited_ins.second && visited_ins.first->second >= dirty)
+    return;
+  visited_ins.first->second = dirty;
+
+  EXPLAIN("touching %s", node->path().c_str());
+  for (vector<Edge*>::const_iterator ei = node->out_edges().begin();
+       ei != node->out_edges().end(); ++ei) {
+    Edge* e = *ei;
+    e->outputs_ready_ = false;
+
+    bool is_order_only =
+        std::find(e->inputs_.begin(), e->inputs_.end() - e->order_only_deps_,
+                  node) == e->inputs_.end() - e->order_only_deps_;
+    bool outputs_dirty = dirty && !is_order_only;
+    for (vector<Node*>::const_iterator ni = e->outputs_.begin();
+         ni != e->outputs_.end(); ++ni) {
+      if (outputs_dirty) {
+        EXPLAIN("marking %s as dirty", (*ni)->path().c_str());
+        (*ni)->MarkDirty();
+      } else if (dirty && is_order_only) {
+        EXPLAIN("%s order-only on %s", (*ni)->path().c_str(),
+                node->path().c_str());
+      }
+      TouchSubNode(*ni, outputs_dirty, visited);
+    }
+  }
+}
+
 bool Builder::Build(string* err) {
-  assert(!AlreadyUpToDate());
-
-  status_->PlanHasTotalEdges(plan_.command_edge_count());
-  int pending_commands = 0;
-  int failures_allowed = config_.failures_allowed;
-
   // Set up the command runner if we haven't done so already.
   if (!command_runner_.get()) {
     if (config_.dry_run)
       command_runner_.reset(new DryRunCommandRunner);
     else
-      command_runner_.reset(new RealCommandRunner(config_));
+      command_runner_.reset(new RealCommandRunner(
+          config_, config_.continuous ? disk_interface_->GetWatcher() : 0));
   }
+
+  if (config_.continuous) {
+    while (1) {
+      CommandRunner::Result result;
+      if (!AlreadyUpToDate() && !RunSingleBuild(err, &result.watcher) &&
+          *err == "interrupted by user") {
+        return false;
+      }
+
+      std::set<Node *> missing_files;
+      while (1) {
+        if (result.watcher) {
+          EXPLAIN("%s", "watched files changed");
+          for (Watcher::key_set_iterator i = result.watcher->added_keys_begin();
+               i != result.watcher->added_keys_end(); ++i) {
+            Node* n = static_cast<Node*>(*i);
+            EXPLAIN("removed missing file %s", n->path().c_str());
+            missing_files.erase(n);
+            TouchNode(n, true);
+          }
+          for (Watcher::key_set_iterator i =
+                   result.watcher->changed_keys_begin();
+               i != result.watcher->changed_keys_end(); ++i) {
+            Node* n = static_cast<Node*>(*i);
+            EXPLAIN("touching changed file %s", n->path().c_str());
+            TouchNode(n, true);
+          }
+          for (Watcher::key_set_iterator i = result.watcher->deleted_keys_begin();
+               i != result.watcher->deleted_keys_end(); ++i) {
+            Node* n = static_cast<Node*>(*i);
+            EXPLAIN("added missing file %s", n->path().c_str());
+            missing_files.insert(n);
+          }
+          result.watcher->Reset();
+
+          if (missing_files.empty()) {
+            if (!plan_.Rebuild(err)) {
+              return false;
+            }
+            status_->PlanWasRebuilt();
+            break;
+          }
+        }
+
+        string idle_msg = *err;
+        if (err->empty()) {
+          idle_msg = "build successful";
+        }
+        if (!missing_files.empty()) {
+          char msg[64];
+          snprintf(msg, 64, "; missing %d files", (int)missing_files.size());
+          idle_msg += msg;
+        }
+        status_->BuildIdle(idle_msg);
+
+        if (!command_runner_->WaitForCommand(&result) ||
+            result.status == ExitInterrupted) {
+          *err = "interrupted by user";
+          status_->BuildFinished();
+          return false;
+        }
+      }
+    }
+  } else {
+    return RunSingleBuild(err, 0);
+  }
+}
+
+bool Builder::RunSingleBuild(string* err, Watcher** watcher) {
+  assert(!AlreadyUpToDate());
+
+  status_->PlanHasTotalEdges(plan_.command_edge_count());
+  int pending_commands = 0;
+  int failures_allowed = config_.failures_allowed;
 
   // This main loop runs the entire build process.
   // It is structured like this:
@@ -641,6 +795,13 @@ bool Builder::Build(string* err) {
         Cleanup();
         status_->BuildFinished();
         *err = "interrupted by user";
+        return false;
+      }
+
+      if (result.watcher) {
+        Cleanup();
+        *watcher = result.watcher;
+        *err = "interrupted by missing file";
         return false;
       }
 

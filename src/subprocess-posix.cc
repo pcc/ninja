@@ -24,6 +24,7 @@
 #include <sys/wait.h>
 
 #include "util.h"
+#include "watcher.h"
 
 Subprocess::Subprocess(bool use_console) : fd_(-1), pid_(-1),
                                            use_console_(use_console) {
@@ -151,7 +152,7 @@ void SubprocessSet::SetInterruptedFlag(int signum) {
   interrupted_ = true;
 }
 
-SubprocessSet::SubprocessSet() {
+SubprocessSet::SubprocessSet() : watcher_(0) {
   sigset_t set;
   sigemptyset(&set);
   sigaddset(&set, SIGINT);
@@ -199,14 +200,28 @@ bool SubprocessSet::DoWork() {
     ++nfds;
   }
 
-  interrupted_ = false;
-  int ret = ppoll(&fds.front(), nfds, NULL, &old_mask_);
-  if (ret == -1) {
-    if (errno != EINTR) {
-      perror("ninja: ppoll");
-      return false;
+  if (watcher_) {
+    pollfd pfd = { watcher_->fd_, POLLIN | POLLPRI, 0 };
+    fds.push_back(pfd);
+    ++nfds;
+  }
+
+  while (1) {
+    interrupted_ = false;
+    int ret = ppoll(&fds.front(), nfds, watcher_ ? watcher_->Timeout() : 0,
+                    &old_mask_);
+    if (ret == -1) {
+      if (errno != EINTR) {
+        perror("ninja: ppoll");
+        return false;
+      }
+      return interrupted_;
     }
-    return interrupted_;
+    if (watcher_ && fds.back().revents) {
+      watcher_->OnReady();
+      continue;
+    }
+    break;
   }
 
   nfds_t cur_nfd = 0;
@@ -234,26 +249,42 @@ bool SubprocessSet::DoWork() {
 bool SubprocessSet::DoWork() {
   fd_set set;
   int nfds = 0;
-  FD_ZERO(&set);
 
-  for (vector<Subprocess*>::iterator i = running_.begin();
-       i != running_.end(); ++i) {
-    int fd = (*i)->fd_;
-    if (fd >= 0) {
-      FD_SET(fd, &set);
-      if (nfds < fd+1)
-        nfds = fd+1;
-    }
-  }
+  int ret;
+  while (1) {
+    FD_ZERO(&set);
 
-  interrupted_ = false;
-  int ret = pselect(nfds, &set, 0, 0, 0, &old_mask_);
-  if (ret == -1) {
-    if (errno != EINTR) {
-      perror("ninja: pselect");
-      return false;
+    for (vector<Subprocess*>::iterator i = running_.begin();
+         i != running_.end(); ++i) {
+      int fd = (*i)->fd_;
+      if (fd >= 0) {
+        FD_SET(fd, &set);
+        if (nfds < fd+1)
+          nfds = fd+1;
+      }
     }
-    return interrupted_;
+
+    if (watcher_) {
+      FD_SET(watcher_->fd_, &set);
+      if (nfds < watcher_->fd_+1)
+        nfds = watcher_->fd_+1;
+    }
+
+    interrupted_ = false;
+    int ret = pselect(nfds, &set, 0, 0, watcher_ ? watcher_->Timeout() : 0,
+                      &old_mask_);
+    if (ret == -1) {
+      if (errno != EINTR) {
+        perror("ninja: pselect");
+        return false;
+      }
+      return interrupted_;
+    }
+    if (watcher_ && FD_ISSET(watcher_->fd_)) {
+      watcher_->OnReady();
+      continue;
+    }
+    break;
   }
 
   for (vector<Subprocess*>::iterator i = running_.begin();

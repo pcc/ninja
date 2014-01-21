@@ -64,6 +64,7 @@ struct VirtualFileSystem : public DiskInterface {
   virtual bool MakeDir(const string& path);
   virtual string ReadFile(const string& path, string* err);
   virtual int RemoveFile(const string& path);
+  virtual Watcher* GetWatcher();
 
   /// An entry for a single in-memory file.
   struct Entry {

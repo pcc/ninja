@@ -16,10 +16,12 @@
 #define NINJA_DISK_INTERFACE_H_
 
 #include <map>
+#include <memory>
 #include <string>
 using namespace std;
 
 #include "timestamp.h"
+#include "watcher.h"
 
 /// Interface for accessing the disk.
 ///
@@ -52,6 +54,8 @@ struct DiskInterface {
   /// Create all the parent directories for path; like mkdir -p
   /// `basename path`.
   bool MakeDirs(const string& path);
+
+  virtual Watcher *GetWatcher() = 0;
 };
 
 /// Implementation of DiskInterface that actually hits the disk.
@@ -74,7 +78,12 @@ struct RealDiskInterface : public DiskInterface {
   /// Whether stat information can be cached.  Only has an effect on Windows.
   void AllowStatCache(bool allow);
 
+  virtual Watcher *GetWatcher();
+  void CreateWatcher();
+
  private:
+  auto_ptr<Watcher> watcher_;
+
 #ifdef _WIN32
   /// Whether stat information can be cached.
   bool use_cache_;
@@ -85,6 +94,9 @@ struct RealDiskInterface : public DiskInterface {
   typedef map<string, DirCache> Cache;
   mutable Cache cache_;
 #endif
+
+  RealDiskInterface(const RealDiskInterface &other); // DO NOT IMPLEMENT
+  void operator=(const RealDiskInterface &other);    // DO NOT IMPLEMENT
 };
 
 #endif  // NINJA_DISK_INTERFACE_H_

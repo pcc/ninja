@@ -28,6 +28,8 @@ using namespace std;
 
 #include "exit_status.h"
 
+struct Watcher;
+
 /// Subprocess wraps a single async subprocess.  It is entirely
 /// passive: it expects the caller to notify it when its fds are ready
 /// for reading, as well as call Finish() to reap the child once done()
@@ -83,6 +85,8 @@ struct SubprocessSet {
 
   vector<Subprocess*> running_;
   queue<Subprocess*> finished_;
+
+  Watcher* watcher_;
 
 #ifdef _WIN32
   static BOOL WINAPI NotifyInterrupted(DWORD dwCtrlType);

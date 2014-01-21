@@ -35,6 +35,7 @@ struct DiskInterface;
 struct Edge;
 struct Node;
 struct State;
+class Watcher;
 
 /// Plan stores the state of a build plan: what we intend to build,
 /// which steps we're ready to execute.
@@ -66,6 +67,8 @@ struct Plan {
   /// Number of edges with commands to run.
   int command_edge_count() const { return command_edges_; }
 
+  bool Rebuild(string* err);
+
 private:
   bool AddSubTarget(Node* node, vector<Node*>* stack, string* err);
   bool CheckDependencyCycle(Node* node, vector<Node*>* stack, string* err);
@@ -95,6 +98,8 @@ private:
 
   /// Total remaining number of wanted edges.
   int wanted_edges_;
+
+  vector<Node*> root_targets_;
 };
 
 /// CommandRunner is an interface that wraps running the build
@@ -105,9 +110,10 @@ struct CommandRunner {
   virtual bool CanRunMore() = 0;
   virtual bool StartCommand(Edge* edge) = 0;
 
-  /// The result of waiting for a command.
+  /// The result of waiting for a command or watch.
   struct Result {
-    Result() : edge(NULL) {}
+    Result() : watcher(NULL), edge(NULL) {}
+    Watcher* watcher;
     Edge* edge;
     ExitStatus status;
     string output;
@@ -122,8 +128,9 @@ struct CommandRunner {
 
 /// Options (e.g. verbosity, parallelism) passed to a build.
 struct BuildConfig {
-  BuildConfig() : verbosity(NORMAL), dry_run(false), parallelism(1),
-                  failures_allowed(1), max_load_average(-0.0f) {}
+  BuildConfig()
+      : verbosity(NORMAL), continuous(false), dry_run(false), parallelism(1),
+        failures_allowed(1), max_load_average(-0.0f) {}
 
   enum Verbosity {
     NORMAL,
@@ -131,6 +138,7 @@ struct BuildConfig {
     VERBOSE
   };
   Verbosity verbosity;
+  bool continuous;
   bool dry_run;
   int parallelism;
   int failures_allowed;
@@ -173,6 +181,9 @@ struct Builder {
     scan_.set_build_log(log);
   }
 
+  void TouchNode(Node* node, bool dirty);
+  void TouchSubNode(Node* node, bool dirty, map<Node*, bool>* visited);
+
   State* state_;
   const BuildConfig& config_;
   Plan plan_;
@@ -183,6 +194,7 @@ struct Builder {
    bool ExtractDeps(CommandRunner::Result* result, const string& deps_type,
                     const string& deps_prefix, vector<Node*>* deps_nodes,
                     string* err);
+   bool RunSingleBuild(string* err, Watcher** watcher);
 
   DiskInterface* disk_interface_;
   DependencyScan scan_;
@@ -196,10 +208,12 @@ struct Builder {
 struct BuildStatus {
   explicit BuildStatus(const BuildConfig& config);
   void PlanHasTotalEdges(int total);
+  void PlanWasRebuilt();
   void BuildEdgeStarted(Edge* edge);
   void BuildEdgeFinished(Edge* edge, bool success, const string& output,
                          int* start_time, int* end_time);
   void BuildFinished();
+  void BuildIdle(string status);
 
   /// Format the progress status string by replacing the placeholders.
   /// See the user manual for more information about the available

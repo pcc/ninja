@@ -28,6 +28,12 @@
 #include "util.h"
 
 bool Node::Stat(DiskInterface* disk_interface) {
+  Watcher* w = disk_interface->GetWatcher();
+
+  if (w &&
+      (!in_edge() || (in_edge()->is_phony() && in_edge()->inputs_.empty())))
+    w->AddPath(path_, (void*)this);
+
   METRIC_RECORD("node stat");
   mtime_ = disk_interface->Stat(path_);
   return mtime_ > 0;

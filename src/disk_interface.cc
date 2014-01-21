@@ -260,3 +260,11 @@ void RealDiskInterface::AllowStatCache(bool allow) {
     cache_.clear();
 #endif
 }
+
+Watcher *RealDiskInterface::GetWatcher() {
+  return watcher_.get();
+}
+
+void RealDiskInterface::CreateWatcher() {
+  watcher_.reset(new Watcher);
+}
