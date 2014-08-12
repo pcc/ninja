@@ -395,8 +395,8 @@ all_targets += n.build(binary('hash_collision_bench'), 'link', objs,
 objs = cxx('manifest_parser_perftest')
 all_targets += n.build(binary('manifest_parser_perftest'), 'link', objs,
                               implicit=ninja_lib, variables=[('libs', libs)])
-objs = cxx('watcher_test')
-all_targets += n.build(binary('watcher_test'), 'link', objs,
+objs = cxx('watcher_manualtest')
+all_targets += n.build(binary('watcher_manualtest'), 'link', objs,
                               implicit=ninja_lib, variables=[('libs', libs)])
 n.newline()
 

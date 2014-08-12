@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/inotify.h>
+#include <sys/select.h>
 #include <unistd.h>
 
 Watcher::Watcher() {
@@ -222,6 +223,27 @@ timespec* Watcher::Timeout() {
   timeout_.tv_sec = 0;
   timeout_.tv_nsec = last_refresh_.tv_nsec + hysteresis_ns - now_ns;
   return &timeout_;
+}
+
+void Watcher::WaitForEvents() {
+  while (1) {
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(fd_, &fds);
+    int ret = pselect(fd_ + 1, &fds, 0, 0, Timeout(), 0);
+
+    switch (ret) {
+    case 1:
+      OnReady();
+      break;
+
+    case 0:
+      return;
+
+    case -1:
+      Fatal("pselect: %s", strerror(errno));
+    }
+  }
 }
 
 #endif

@@ -75,6 +75,7 @@ class Watcher {
            !deleted_keys_.empty();
   }
   timespec *Timeout();
+  void WaitForEvents();
 };
 
 #else  // !__linux
