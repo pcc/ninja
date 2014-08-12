@@ -33,12 +33,17 @@ void Watcher::AddPath(std::string path, void* key) {
   size_t pos = 0;
   subdir_map_type* map = &roots_;
 
+  // Ensure we watch the current directory for relative paths.
+  if (path[0] != '/')
+    path = "./" + path;
+
   while (1) {
     size_t slash_offset = path.find('/', pos);
     std::string subdir = path.substr(pos, slash_offset - pos);
     WatchedNode* subdir_node = &(*map)[subdir];
 
-    int mask = IN_CREATE | IN_MOVED_TO | IN_MOVE_SELF | IN_DELETE_SELF;
+    int mask =
+        IN_CREATE | IN_MOVED_FROM | IN_MOVED_TO | IN_MOVE_SELF | IN_DELETE_SELF;
     if (slash_offset == std::string::npos) {
       mask = IN_CLOSE_WRITE | IN_MOVE_SELF | IN_DELETE_SELF;
       subdir_node->key_ = key;
@@ -111,7 +116,7 @@ void Watcher::OnReady() {
     return;
   }
 
-  if (ev->mask & (IN_CREATE | IN_MOVED_TO)) {
+  if (ev->mask & (IN_CREATE | IN_MOVED_FROM | IN_MOVED_TO)) {
     subdir_map_type::iterator i = wme->node_->subdirs_.find(ev->name);
     if (i != wme->node_->subdirs_.end()) {
       Refresh(wme->path_ + "/" + ev->name, &i->second);
@@ -140,7 +145,8 @@ void Watcher::Refresh(const std::string& path, WatchedNode* node) {
     node->has_wd_ = false;
   }
 
-  int mask = IN_CREATE | IN_MOVED_TO | IN_MOVE_SELF | IN_DELETE_SELF;
+  int mask =
+      IN_CREATE | IN_MOVED_FROM | IN_MOVED_TO | IN_MOVE_SELF | IN_DELETE_SELF;
   if (node->key_) mask = IN_CLOSE_WRITE | IN_MOVE_SELF | IN_DELETE_SELF;
 
   int wd = inotify_add_watch(fd_, path.c_str(), mask);

@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifndef _NINJA_WATCHER_H
+#define _NINJA_WATCHER_H
+
 #include <map>
 #include <set>
 #include <string>
@@ -44,9 +47,6 @@ class Watcher {
 
   subdir_map_type roots_;
 
-  typedef std::set<void*> key_set_type;
-  key_set_type added_keys_, changed_keys_, deleted_keys_;
-
   timespec timeout_, last_refresh_;
 
   void KeyAdded(void* key);
@@ -62,13 +62,9 @@ class Watcher {
   void AddPath(std::string path, void* key);
   void OnReady();
 
-  typedef key_set_type::const_iterator key_set_iterator;
-  key_set_iterator added_keys_begin() const { return added_keys_.begin(); }
-  key_set_iterator added_keys_end() const { return added_keys_.end(); }
-  key_set_iterator changed_keys_begin() const { return changed_keys_.begin(); }
-  key_set_iterator changed_keys_end() const { return changed_keys_.end(); }
-  key_set_iterator deleted_keys_begin() const { return deleted_keys_.begin(); }
-  key_set_iterator deleted_keys_end() const { return deleted_keys_.end(); }
+  typedef std::set<void*> key_set_type;
+  key_set_type added_keys_, changed_keys_, deleted_keys_;
+
   void Reset();
   bool Pending() const {
     return !added_keys_.empty() || !changed_keys_.empty() ||
@@ -82,4 +78,6 @@ class Watcher {
 
 #define HAS_WATCHER 0
 
-#endif
+#endif  // __linux
+
+#endif  // _NINJA_WATCHER_H

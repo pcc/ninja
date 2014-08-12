@@ -699,22 +699,24 @@ bool Builder::Build(string* err) {
       while (1) {
         if (result.watcher) {
           EXPLAIN("%s", "watched files changed");
-          for (Watcher::key_set_iterator i = result.watcher->added_keys_begin();
-               i != result.watcher->added_keys_end(); ++i) {
+          for (Watcher::key_set_type::iterator i =
+                   result.watcher->added_keys_.begin();
+               i != result.watcher->added_keys_.end(); ++i) {
             Node* n = static_cast<Node*>(*i);
             EXPLAIN("removed missing file %s", n->path().c_str());
             missing_files.erase(n);
             TouchNode(n, true);
           }
-          for (Watcher::key_set_iterator i =
-                   result.watcher->changed_keys_begin();
-               i != result.watcher->changed_keys_end(); ++i) {
+          for (Watcher::key_set_type::iterator i =
+                   result.watcher->changed_keys_.begin();
+               i != result.watcher->changed_keys_.end(); ++i) {
             Node* n = static_cast<Node*>(*i);
             EXPLAIN("touching changed file %s", n->path().c_str());
             TouchNode(n, true);
           }
-          for (Watcher::key_set_iterator i = result.watcher->deleted_keys_begin();
-               i != result.watcher->deleted_keys_end(); ++i) {
+          for (Watcher::key_set_type::iterator i =
+                   result.watcher->deleted_keys_.begin();
+               i != result.watcher->deleted_keys_.end(); ++i) {
             Node* n = static_cast<Node*>(*i);
             EXPLAIN("added missing file %s", n->path().c_str());
             missing_files.insert(n);

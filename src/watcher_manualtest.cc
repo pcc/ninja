@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #include "watcher.h"
-#include "util.h"
 #include <iostream>
 
 int main(int argc, char **argv) {
@@ -24,16 +23,16 @@ int main(int argc, char **argv) {
 
   while (1) {
     w.WaitForEvents();
-    for (Watcher::key_set_iterator i = w.added_keys_begin();
-         i != w.added_keys_end(); ++i) {
+    for (Watcher::key_set_type::iterator i = w.added_keys_.begin();
+         i != w.added_keys_.end(); ++i) {
       std::cout << "added " << static_cast<char *>(*i) << std::endl;
     }
-    for (Watcher::key_set_iterator i = w.changed_keys_begin();
-         i != w.changed_keys_end(); ++i) {
+    for (Watcher::key_set_type::iterator i = w.changed_keys_.begin();
+         i != w.changed_keys_.end(); ++i) {
       std::cout << "changed " << static_cast<char *>(*i) << std::endl;
     }
-    for (Watcher::key_set_iterator i = w.deleted_keys_begin();
-         i != w.deleted_keys_end(); ++i) {
+    for (Watcher::key_set_type::iterator i = w.deleted_keys_.begin();
+         i != w.deleted_keys_.end(); ++i) {
       std::cout << "deleted " << static_cast<char *>(*i) << std::endl;
     }
     w.Reset();
