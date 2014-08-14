@@ -121,6 +121,8 @@ if platform.is_msvc():
               '/wd4512', '/wd4800', '/wd4702', '/wd4819',
               # Disable warnings about passing "this" during initialization.
               '/wd4355',
+              # Disable warning that forbids 'while (1)'
+              '/wd4127',
               '/GR-',  # Disable RTTI.
               # Disable size_t -> int truncation warning.
               # We never have strings or arrays larger than 2**31.
@@ -309,6 +311,8 @@ if platform.is_msvc():
     libs.append('ninja.lib')
 else:
     libs.append('-lninja')
+
+if platform.is_linux():
     libs.append('-lrt')
 
 all_targets = []

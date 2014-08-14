@@ -250,7 +250,6 @@ bool SubprocessSet::DoWork() {
   fd_set set;
   int nfds = 0;
 
-  int ret;
   while (1) {
     FD_ZERO(&set);
 
@@ -280,7 +279,7 @@ bool SubprocessSet::DoWork() {
       }
       return interrupted_;
     }
-    if (watcher_ && FD_ISSET(watcher_->fd_)) {
+    if (watcher_ && FD_ISSET(watcher_->fd_, &set)) {
       watcher_->OnReady();
       continue;
     }

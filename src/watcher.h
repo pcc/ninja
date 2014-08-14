@@ -15,6 +15,9 @@
 #ifndef _NINJA_WATCHER_H
 #define _NINJA_WATCHER_H
 
+#ifndef _WIN32
+#include <time.h>
+#endif
 #include <map>
 #include <set>
 #include <string>
@@ -84,14 +87,28 @@ class NativeWatcher : public Watcher {
   void AddPath(std::string path, void* key);
   void OnReady();
 
-  timespec *Timeout();
+  timespec* Timeout();
   void WaitForEvents();
 };
 
-#else   // __linux
+#elif !defined(_WIN32)
 
-typedef Watcher NativeWatcher;
+class NativeWatcher : public Watcher {
+ public:
+  int fd_;
+  void OnReady() {
+    assert(0 && "not implemented");
+  }
+  timespec* Timeout() {
+    assert(0 && "not implemented");
+    return 0;
+  }
+};
 
-#endif  // __linux
+#else
+
+class NativeWatcher : public Watcher {};
+
+#endif
 
 #endif  // _NINJA_WATCHER_H
