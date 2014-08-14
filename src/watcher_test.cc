@@ -57,9 +57,9 @@ TEST_F(WatcherTest, Add) {
 
   watcher_->WaitForEvents();
 
-  EXPECT_EQ(0, watcher_->result_.changed_keys_.size());
-  EXPECT_EQ(0, watcher_->result_.deleted_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.added_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.changed_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.deleted_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.added_keys_.size());
   EXPECT_EQ(CharKey('a'), *watcher_->result_.added_keys_.begin());
 }
 
@@ -72,9 +72,9 @@ TEST_F(WatcherTest, Change) {
 
   watcher_->WaitForEvents();
 
-  EXPECT_EQ(0, watcher_->result_.added_keys_.size());
-  EXPECT_EQ(0, watcher_->result_.deleted_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.changed_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.added_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.deleted_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.changed_keys_.size());
   EXPECT_EQ(CharKey('a'), *watcher_->result_.changed_keys_.begin());
 }
 
@@ -88,9 +88,9 @@ TEST_F(WatcherTest, ChangeAbsolutePath) {
 
   watcher_->WaitForEvents();
 
-  EXPECT_EQ(0, watcher_->result_.added_keys_.size());
-  EXPECT_EQ(0, watcher_->result_.deleted_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.changed_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.added_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.deleted_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.changed_keys_.size());
   EXPECT_EQ(CharKey('a'), *watcher_->result_.changed_keys_.begin());
 }
 
@@ -103,9 +103,9 @@ TEST_F(WatcherTest, Delete) {
 
   watcher_->WaitForEvents();
 
-  EXPECT_EQ(0, watcher_->result_.added_keys_.size());
-  EXPECT_EQ(0, watcher_->result_.changed_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.deleted_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.added_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.changed_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.deleted_keys_.size());
   EXPECT_EQ(CharKey('a'), *watcher_->result_.deleted_keys_.begin());
 }
 
@@ -119,9 +119,9 @@ TEST_F(WatcherTest, Rename) {
 
   watcher_->WaitForEvents();
 
-  EXPECT_EQ(0, watcher_->result_.changed_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.added_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.deleted_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.changed_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.added_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.deleted_keys_.size());
   EXPECT_EQ(CharKey('a'), *watcher_->result_.deleted_keys_.begin());
   EXPECT_EQ(CharKey('b'), *watcher_->result_.added_keys_.begin());
 }
@@ -135,9 +135,9 @@ TEST_F(WatcherTest, AddSubdir1) {
 
   watcher_->WaitForEvents();
 
-  EXPECT_EQ(0, watcher_->result_.changed_keys_.size());
-  EXPECT_EQ(0, watcher_->result_.deleted_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.added_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.changed_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.deleted_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.added_keys_.size());
   EXPECT_EQ(CharKey('a'), *watcher_->result_.added_keys_.begin());
 }
 
@@ -150,9 +150,9 @@ TEST_F(WatcherTest, AddSubdir2) {
 
   watcher_->WaitForEvents();
 
-  EXPECT_EQ(0, watcher_->result_.changed_keys_.size());
-  EXPECT_EQ(0, watcher_->result_.deleted_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.added_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.changed_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.deleted_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.added_keys_.size());
   EXPECT_EQ(CharKey('b'), *watcher_->result_.added_keys_.begin());
   watcher_->result_.Reset();
 
@@ -160,9 +160,9 @@ TEST_F(WatcherTest, AddSubdir2) {
 
   watcher_->WaitForEvents();
 
-  EXPECT_EQ(0, watcher_->result_.changed_keys_.size());
-  EXPECT_EQ(0, watcher_->result_.deleted_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.added_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.changed_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.deleted_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.added_keys_.size());
   EXPECT_EQ(CharKey('a'), *watcher_->result_.added_keys_.begin());
 }
 
@@ -175,9 +175,9 @@ TEST_F(WatcherTest, RenameSubdir) {
 
   watcher_->WaitForEvents();
 
-  EXPECT_EQ(0, watcher_->result_.changed_keys_.size());
-  EXPECT_EQ(0, watcher_->result_.deleted_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.added_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.changed_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.deleted_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.added_keys_.size());
   EXPECT_EQ(CharKey('a'), *watcher_->result_.added_keys_.begin());
   watcher_->result_.Reset();
 
@@ -185,9 +185,9 @@ TEST_F(WatcherTest, RenameSubdir) {
 
   watcher_->WaitForEvents();
 
-  EXPECT_EQ(0, watcher_->result_.changed_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.added_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.deleted_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.changed_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.added_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.deleted_keys_.size());
   EXPECT_EQ(CharKey('a'), *watcher_->result_.deleted_keys_.begin());
   EXPECT_EQ(CharKey('b'), *watcher_->result_.added_keys_.begin());
 }
@@ -204,9 +204,9 @@ TEST_F(WatcherTest, Symlinks) {
 
   watcher_->WaitForEvents();
 
-  EXPECT_EQ(0, watcher_->result_.changed_keys_.size());
-  EXPECT_EQ(0, watcher_->result_.deleted_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.added_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.changed_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.deleted_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.added_keys_.size());
   EXPECT_EQ(CharKey('a'), *watcher_->result_.added_keys_.begin());
   watcher_->result_.Reset();
 
@@ -214,9 +214,9 @@ TEST_F(WatcherTest, Symlinks) {
 
   watcher_->WaitForEvents();
 
-  EXPECT_EQ(0, watcher_->result_.changed_keys_.size());
-  EXPECT_EQ(0, watcher_->result_.deleted_keys_.size());
-  ASSERT_EQ(1, watcher_->result_.added_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.changed_keys_.size());
+  EXPECT_EQ(0u, watcher_->result_.deleted_keys_.size());
+  ASSERT_EQ(1u, watcher_->result_.added_keys_.size());
   EXPECT_EQ(CharKey('b'), *watcher_->result_.added_keys_.begin());
 }
 #endif
