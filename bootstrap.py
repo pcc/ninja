@@ -86,6 +86,9 @@ for src in glob.glob('src/*.cc'):
         if src.endswith('-win32.cc'):
             continue
 
+    if not platform.is_linux() and src.endswith('-linux.cc'):
+        continue
+
     sources.append(src)
 
 if platform.is_windows():
@@ -122,6 +125,8 @@ binary = 'ninja.bootstrap'
 if platform.is_windows():
     binary = 'ninja.bootstrap.exe'
 args.extend(sources)
+if platform.is_linux():
+    args.append('-lrt')
 if platform.is_msvc():
     args.extend(['/link', '/out:' + binary])
 else:

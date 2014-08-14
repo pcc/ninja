@@ -15,6 +15,7 @@
 #ifndef _NINJA_WATCHER_H
 #define _NINJA_WATCHER_H
 
+#include <assert.h>
 #ifndef _WIN32
 #include <time.h>
 #endif
