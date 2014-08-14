@@ -148,6 +148,10 @@ Watcher* VirtualFileSystem::GetWatcher() {
   return 0;
 }
 
+NativeWatcher* VirtualFileSystem::GetNativeWatcher() {
+  return 0;
+}
+
 void ScopedTempDir::CreateAndEnter(const string& name) {
   // First change into the system temp dir and save it for cleanup.
   start_dir_ = GetSystemTempDir();

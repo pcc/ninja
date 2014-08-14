@@ -19,10 +19,35 @@
 #include <set>
 #include <string>
 
-#ifdef __linux
-#define HAS_WATCHER 1
+struct WatchResult {
+  void KeyAdded(void* key);
+  void KeyDeleted(void* key);
+  void KeyChanged(void* key);
+
+  typedef std::set<void*> key_set_type;
+  key_set_type added_keys_, changed_keys_, deleted_keys_;
+
+  bool Pending() const {
+    return !added_keys_.empty() || !changed_keys_.empty() ||
+           !deleted_keys_.empty();
+  }
+
+  void Reset();
+};
 
 class Watcher {
+ public:
+  virtual void AddPath(std::string path, void* key) = 0;
+  virtual void WaitForEvents() = 0;
+
+  WatchResult result_;
+};
+
+#ifdef __linux
+
+#define HAS_NATIVE_WATCHER 1
+
+class NativeWatcher : public Watcher {
   struct WatchedNode;
 
   struct WatchMapEntry {
@@ -49,34 +74,23 @@ class Watcher {
 
   timespec timeout_, last_refresh_;
 
-  void KeyAdded(void* key);
-  void KeyDeleted(void* key);
-  void KeyChanged(void* key);
   void Refresh(const std::string& path, WatchedNode* node);
 
  public:
-  Watcher();
-  ~Watcher();
+  NativeWatcher();
+  ~NativeWatcher();
 
   int fd_;
   void AddPath(std::string path, void* key);
   void OnReady();
 
-  typedef std::set<void*> key_set_type;
-  key_set_type added_keys_, changed_keys_, deleted_keys_;
-
-  void Reset();
-  bool Pending() const {
-    return !added_keys_.empty() || !changed_keys_.empty() ||
-           !deleted_keys_.empty();
-  }
   timespec *Timeout();
   void WaitForEvents();
 };
 
-#else  // !__linux
+#else   // __linux
 
-#define HAS_WATCHER 0
+typedef Watcher NativeWatcher;
 
 #endif  // __linux
 

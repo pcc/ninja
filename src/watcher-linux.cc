@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifdef __linux
-
 #include "watcher.h"
 #include "util.h"
 #include <errno.h>
@@ -22,14 +20,14 @@
 #include <sys/select.h>
 #include <unistd.h>
 
-Watcher::Watcher() {
+NativeWatcher::NativeWatcher() {
   fd_ = inotify_init();
   SetCloseOnExec(fd_);
 }
 
-Watcher::~Watcher() { close(fd_); }
+NativeWatcher::~NativeWatcher() { close(fd_); }
 
-void Watcher::AddPath(std::string path, void* key) {
+void NativeWatcher::AddPath(std::string path, void* key) {
   size_t pos = 0;
   subdir_map_type* map = &roots_;
 
@@ -80,7 +78,7 @@ void Watcher::AddPath(std::string path, void* key) {
   }
 }
 
-void Watcher::OnReady() {
+void NativeWatcher::OnReady() {
   // We may only read full structures out of this fd, and we have no way of
   // knowing how large they are. This makes reading this fd rather tricky.
   char* buf;
@@ -128,7 +126,7 @@ void Watcher::OnReady() {
   }
 
   if (ev->mask & IN_CLOSE_WRITE) {
-    KeyChanged(wme->node_->key_);
+    result_.KeyChanged(wme->node_->key_);
   }
 
   delete[] buf;
@@ -136,7 +134,7 @@ void Watcher::OnReady() {
   clock_gettime(CLOCK_MONOTONIC, &last_refresh_);
 }
 
-void Watcher::Refresh(const std::string& path, WatchedNode* node) {
+void NativeWatcher::Refresh(const std::string& path, WatchedNode* node) {
   bool had_wd = node->has_wd_;
   if (had_wd) {
     inotify_rm_watch(fd_, node->it_->first);
@@ -159,11 +157,11 @@ void Watcher::Refresh(const std::string& path, WatchedNode* node) {
 
   if (node->key_) {
     if (had_wd && has_wd) {
-      KeyChanged(node->key_);
+      result_.KeyChanged(node->key_);
     } else if (had_wd && !has_wd) {
-      KeyDeleted(node->key_);
+      result_.KeyDeleted(node->key_);
     } else if (!had_wd && has_wd) {
-      KeyAdded(node->key_);
+      result_.KeyAdded(node->key_);
     }
   }
 
@@ -173,40 +171,10 @@ void Watcher::Refresh(const std::string& path, WatchedNode* node) {
   }
 }
 
-void Watcher::KeyAdded(void* key) {
-  key_set_type::iterator i = deleted_keys_.find(key);
-  if (i != deleted_keys_.end()) {
-    deleted_keys_.erase(i);
-    changed_keys_.insert(key);
-  } else {
-    added_keys_.insert(key);
-  }
-}
-
-void Watcher::KeyChanged(void* key) {
-  if (added_keys_.find(key) == added_keys_.end()) changed_keys_.insert(key);
-}
-
-void Watcher::KeyDeleted(void* key) {
-  key_set_type::iterator i = added_keys_.find(key);
-  if (i == added_keys_.end()) {
-    changed_keys_.erase(key);
-    deleted_keys_.insert(key);
-  } else {
-    added_keys_.erase(i);
-  }
-}
-
-void Watcher::Reset() {
-  added_keys_.clear();
-  changed_keys_.clear();
-  deleted_keys_.clear();
-}
-
-timespec* Watcher::Timeout() {
+timespec* NativeWatcher::Timeout() {
   const long hysteresis_ns = 100000000;
 
-  if (!Pending())
+  if (!result_.Pending())
     return 0;
 
   timespec now;
@@ -231,7 +199,7 @@ timespec* Watcher::Timeout() {
   return &timeout_;
 }
 
-void Watcher::WaitForEvents() {
+void NativeWatcher::WaitForEvents() {
   while (1) {
     fd_set fds;
     FD_ZERO(&fds);
@@ -251,5 +219,3 @@ void Watcher::WaitForEvents() {
     }
   }
 }
-
-#endif

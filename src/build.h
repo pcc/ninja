@@ -35,7 +35,7 @@ struct DiskInterface;
 struct Edge;
 struct Node;
 struct State;
-class Watcher;
+struct WatchResult;
 
 /// Plan stores the state of a build plan: what we intend to build,
 /// which steps we're ready to execute.
@@ -112,8 +112,8 @@ struct CommandRunner {
 
   /// The result of waiting for a command or watch.
   struct Result {
-    Result() : watcher(NULL), edge(NULL) {}
-    Watcher* watcher;
+    Result() : watch_result(NULL), edge(NULL) {}
+    WatchResult* watch_result;
     Edge* edge;
     ExitStatus status;
     string output;
@@ -194,7 +194,7 @@ struct Builder {
    bool ExtractDeps(CommandRunner::Result* result, const string& deps_type,
                     const string& deps_prefix, vector<Node*>* deps_nodes,
                     string* err);
-   bool RunSingleBuild(string* err, Watcher** watcher);
+   bool RunSingleBuild(string* err, WatchResult** watch_result);
 
   DiskInterface* disk_interface_;
   DependencyScan scan_;

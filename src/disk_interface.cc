@@ -261,10 +261,19 @@ void RealDiskInterface::AllowStatCache(bool allow) {
 #endif
 }
 
-Watcher *RealDiskInterface::GetWatcher() {
+Watcher* RealDiskInterface::GetWatcher() {
   return watcher_.get();
 }
 
-void RealDiskInterface::CreateWatcher() {
-  watcher_.reset(new Watcher);
+NativeWatcher* RealDiskInterface::GetNativeWatcher() {
+  return watcher_.get();
+}
+
+bool RealDiskInterface::CreateWatcher() {
+#ifdef HAS_NATIVE_WATCHER
+  watcher_.reset(new NativeWatcher);
+  return true;
+#else
+  return false;
+#endif
 }

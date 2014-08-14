@@ -56,6 +56,7 @@ struct DiskInterface {
   bool MakeDirs(const string& path);
 
   virtual Watcher *GetWatcher() = 0;
+  virtual NativeWatcher *GetNativeWatcher() = 0;
 };
 
 /// Implementation of DiskInterface that actually hits the disk.
@@ -79,10 +80,11 @@ struct RealDiskInterface : public DiskInterface {
   void AllowStatCache(bool allow);
 
   virtual Watcher *GetWatcher();
-  void CreateWatcher();
+  virtual NativeWatcher *GetNativeWatcher();
+  bool CreateWatcher();
 
  private:
-  auto_ptr<Watcher> watcher_;
+  auto_ptr<NativeWatcher> watcher_;
 
 #ifdef _WIN32
   /// Whether stat information can be cached.

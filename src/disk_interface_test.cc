@@ -188,6 +188,9 @@ struct StatTest : public StateTestWithBuiltinRules,
   virtual Watcher* GetWatcher() {
     return 0;
   }
+  virtual NativeWatcher* GetNativeWatcher() {
+    return 0;
+  }
 
   DependencyScan scan_;
   map<string, TimeStamp> mtimes_;

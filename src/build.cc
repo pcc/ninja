@@ -500,7 +500,7 @@ void Plan::Dump() {
 }
 
 struct RealCommandRunner : public CommandRunner {
-  explicit RealCommandRunner(const BuildConfig& config, Watcher* watcher)
+  explicit RealCommandRunner(const BuildConfig& config, NativeWatcher* watcher)
       : config_(config) {
     subprocs_.watcher_ = watcher;
   }
@@ -548,14 +548,14 @@ bool RealCommandRunner::StartCommand(Edge* edge) {
 bool RealCommandRunner::WaitForCommand(Result* result) {
   Subprocess* subproc;
   while ((subproc = subprocs_.NextFinished()) == NULL &&
-         (!subprocs_.watcher_ || !subprocs_.watcher_->Pending())) {
+         (!subprocs_.watcher_ || !subprocs_.watcher_->result_.Pending())) {
     bool interrupted = subprocs_.DoWork();
     if (interrupted)
       return false;
   }
 
-  if (subprocs_.watcher_ && subprocs_.watcher_->Pending()) {
-    result->watcher = subprocs_.watcher_;
+  if (subprocs_.watcher_ && subprocs_.watcher_->result_.Pending()) {
+    result->watch_result = &subprocs_.watcher_->result_;
     return true;
   }
 
@@ -684,44 +684,44 @@ bool Builder::Build(string* err) {
       command_runner_.reset(new DryRunCommandRunner);
     else
       command_runner_.reset(new RealCommandRunner(
-          config_, config_.continuous ? disk_interface_->GetWatcher() : 0));
+          config_, disk_interface_->GetNativeWatcher()));
   }
 
   if (config_.continuous) {
     while (1) {
       CommandRunner::Result result;
-      if (!AlreadyUpToDate() && !RunSingleBuild(err, &result.watcher) &&
+      if (!AlreadyUpToDate() && !RunSingleBuild(err, &result.watch_result) &&
           *err == "interrupted by user") {
         return false;
       }
 
       std::set<Node *> missing_files;
       while (1) {
-        if (result.watcher) {
+        if (result.watch_result) {
           EXPLAIN("%s", "watched files changed");
-          for (Watcher::key_set_type::iterator i =
-                   result.watcher->added_keys_.begin();
-               i != result.watcher->added_keys_.end(); ++i) {
+          for (WatchResult::key_set_type::iterator i =
+                   result.watch_result->added_keys_.begin();
+               i != result.watch_result->added_keys_.end(); ++i) {
             Node* n = static_cast<Node*>(*i);
             EXPLAIN("removed missing file %s", n->path().c_str());
             missing_files.erase(n);
             TouchNode(n, true);
           }
-          for (Watcher::key_set_type::iterator i =
-                   result.watcher->changed_keys_.begin();
-               i != result.watcher->changed_keys_.end(); ++i) {
+          for (WatchResult::key_set_type::iterator i =
+                   result.watch_result->changed_keys_.begin();
+               i != result.watch_result->changed_keys_.end(); ++i) {
             Node* n = static_cast<Node*>(*i);
             EXPLAIN("touching changed file %s", n->path().c_str());
             TouchNode(n, true);
           }
-          for (Watcher::key_set_type::iterator i =
-                   result.watcher->deleted_keys_.begin();
-               i != result.watcher->deleted_keys_.end(); ++i) {
+          for (WatchResult::key_set_type::iterator i =
+                   result.watch_result->deleted_keys_.begin();
+               i != result.watch_result->deleted_keys_.end(); ++i) {
             Node* n = static_cast<Node*>(*i);
             EXPLAIN("added missing file %s", n->path().c_str());
             missing_files.insert(n);
           }
-          result.watcher->Reset();
+          result.watch_result->Reset();
 
           if (missing_files.empty()) {
             if (!plan_.Rebuild(err)) {
@@ -756,7 +756,7 @@ bool Builder::Build(string* err) {
   }
 }
 
-bool Builder::RunSingleBuild(string* err, Watcher** watcher) {
+bool Builder::RunSingleBuild(string* err, WatchResult** watch_result) {
   assert(!AlreadyUpToDate());
 
   status_->PlanHasTotalEdges(plan_.command_edge_count());
@@ -800,9 +800,9 @@ bool Builder::RunSingleBuild(string* err, Watcher** watcher) {
         return false;
       }
 
-      if (result.watcher) {
+      if (result.watch_result) {
         Cleanup();
-        *watcher = result.watcher;
+        *watch_result = result.watch_result;
         *err = "interrupted by missing file";
         return false;
       }

@@ -283,7 +283,8 @@ for name in ['build',
              'metrics',
              'state',
              'util',
-             'version']:
+             'version',
+             'watcher']:
     objs += cxx(name)
 if platform.is_windows():
     for name in ['subprocess-win32',
