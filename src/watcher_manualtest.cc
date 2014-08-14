@@ -16,25 +16,27 @@
 #include <iostream>
 
 int main(int argc, char **argv) {
-  Watcher w;
+  NativeWatcher w;
   for (int i = 1; i != argc; ++i) {
     w.AddPath(argv[i], argv[i]);
   }
 
   while (1) {
     w.WaitForEvents();
-    for (Watcher::key_set_type::iterator i = w.added_keys_.begin();
-         i != w.added_keys_.end(); ++i) {
+    for (WatchResult::key_set_type::iterator i = w.result_.added_keys_.begin();
+         i != w.result_.added_keys_.end(); ++i) {
       std::cout << "added " << static_cast<char *>(*i) << std::endl;
     }
-    for (Watcher::key_set_type::iterator i = w.changed_keys_.begin();
-         i != w.changed_keys_.end(); ++i) {
+    for (WatchResult::key_set_type::iterator i =
+             w.result_.changed_keys_.begin();
+         i != w.result_.changed_keys_.end(); ++i) {
       std::cout << "changed " << static_cast<char *>(*i) << std::endl;
     }
-    for (Watcher::key_set_type::iterator i = w.deleted_keys_.begin();
-         i != w.deleted_keys_.end(); ++i) {
+    for (WatchResult::key_set_type::iterator i =
+             w.result_.deleted_keys_.begin();
+         i != w.result_.deleted_keys_.end(); ++i) {
       std::cout << "deleted " << static_cast<char *>(*i) << std::endl;
     }
-    w.Reset();
+    w.result_.Reset();
   }
 }
