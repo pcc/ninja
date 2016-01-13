@@ -100,4 +100,44 @@ struct mblock_map {
       type;
 };
 
+#if __cplusplus >= 201103L
+
+template <typename T, typename Alloc>
+T *vec_begin(std::vector<T, Alloc> &v) {
+  return v.data();
+}
+template <typename T, typename Alloc>
+const T *vec_begin(const std::vector<T, Alloc> &v) {
+  return v.data();
+}
+template <typename T, typename Alloc>
+T *vec_end(std::vector<T, Alloc> &v) {
+  return v.data() + v.size();
+}
+template <typename T, typename Alloc>
+const T *vec_end(const std::vector<T, Alloc> &v) {
+  return v.data() + v.size();
+}
+
+#else
+
+template <typename T, typename Alloc>
+T *vec_begin(std::vector<T, Alloc> &v) {
+  return v.empty() ? 0 : &v[0];
+}
+template <typename T, typename Alloc>
+const T *vec_begin(const std::vector<T, Alloc> &v) {
+  return v.empty() ? 0 : &v[0];
+}
+template <typename T, typename Alloc>
+T *vec_end(std::vector<T, Alloc> &v) {
+  return v.empty() ? 0 : &v[0] + v.size();
+}
+template <typename T, typename Alloc>
+const T *vec_end(const std::vector<T, Alloc> &v) {
+  return v.empty() ? 0 : &v[0] + v.size();
+}
+
+#endif
+
 #endif

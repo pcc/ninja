@@ -112,7 +112,8 @@ void VerifyGraph(const State& state) {
     // All edges need at least one output.
     EXPECT_FALSE((*e)->outputs_.empty());
     // Check that the edge's inputs have the edge as out-edge.
-    for (vector<Node*>::const_iterator in_node = (*e)->inputs_.begin();
+    for (mblock_vector<Node*>::type::const_iterator in_node =
+             (*e)->inputs_.begin();
          in_node != (*e)->inputs_.end(); ++in_node) {
       const mblock_vector<Edge*>::type& out_edges = (*in_node)->out_edges();
       EXPECT_NE(std::find(out_edges.begin(), out_edges.end(), *e),

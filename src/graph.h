@@ -129,7 +129,7 @@ private:
 
 /// An edge in the dependency graph; links between Nodes using Rules.
 struct Edge {
-  Edge() : rule_(NULL), pool_(NULL), env_(NULL),
+  Edge(mblock* mb) : rule_(NULL), pool_(NULL), inputs_(mb), env_(NULL),
            outputs_ready_(false), deps_missing_(false),
            implicit_deps_(0), order_only_deps_(0) {}
 
@@ -154,7 +154,7 @@ struct Edge {
 
   const Rule* rule_;
   Pool* pool_;
-  vector<Node*> inputs_;
+  mblock_vector<Node*>::type inputs_;
   vector<Node*> outputs_;
   BindingEnv* env_;
   bool outputs_ready_;
@@ -215,7 +215,7 @@ struct ImplicitDepLoader {
 
   /// Preallocate \a count spaces in the input array on \a edge, returning
   /// an iterator pointing at the first new space.
-  vector<Node*>::iterator PreallocateSpace(Edge* edge, int count);
+  mblock_vector<Node*>::type::iterator PreallocateSpace(Edge* edge, int count);
 
   /// If we don't have a edge that generates this input already,
   /// create one; this makes us not abort if the input is missing,

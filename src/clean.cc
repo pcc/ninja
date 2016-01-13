@@ -138,8 +138,8 @@ void Cleaner::DoCleanTarget(Node* target) {
       Remove(target->path().c_str());
       RemoveEdgeFiles(e);
     }
-    for (vector<Node*>::iterator n = e->inputs_.begin(); n != e->inputs_.end();
-         ++n) {
+    for (mblock_vector<Node*>::type::iterator n = e->inputs_.begin();
+         n != e->inputs_.end(); ++n) {
       Node* next = *n;
       // call DoCleanTarget recursively if this node has not been visited
       if (cleaned_.count(next) == 0) {

@@ -306,7 +306,7 @@ bool Plan::AddSubTarget(Node* node, vector<Node*>* stack, string* err) {
     return true;  // We've already processed the inputs.
 
   stack->push_back(node);
-  for (vector<Node*>::iterator i = edge->inputs_.begin();
+  for (mblock_vector<Node*>::type::iterator i = edge->inputs_.begin();
        i != edge->inputs_.end(); ++i) {
     if (!AddSubTarget(*i, stack, err) && !err->empty())
       return false;
@@ -433,13 +433,13 @@ bool Plan::CleanNode(DependencyScan* scan, Node* node, string* err) {
 
     // If all non-order-only inputs for this edge are now clean,
     // we might have changed the dirty state of the outputs.
-    vector<Node*>::iterator
+    mblock_vector<Node*>::type::iterator
         begin = (*oe)->inputs_.begin(),
         end = (*oe)->inputs_.end() - (*oe)->order_only_deps_;
     if (find_if(begin, end, mem_fun(&Node::dirty)) == end) {
       // Recompute most_recent_input.
       Node* most_recent_input = NULL;
-      for (vector<Node*>::iterator i = begin; i != end; ++i) {
+      for (mblock_vector<Node*>::type::iterator i = begin; i != end; ++i) {
         if (!most_recent_input || (*i)->mtime() > most_recent_input->mtime())
           most_recent_input = *i;
       }
@@ -789,7 +789,7 @@ bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
     if (node_cleaned) {
       // If any output was cleaned, find the most recent mtime of any
       // (existing) non-order-only input or the depfile.
-      for (vector<Node*>::iterator i = edge->inputs_.begin();
+      for (mblock_vector<Node*>::type::iterator i = edge->inputs_.begin();
            i != edge->inputs_.end() - edge->order_only_deps_; ++i) {
         TimeStamp input_mtime = disk_interface_->Stat((*i)->path().c_str(), err);
         if (input_mtime == -1)

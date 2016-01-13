@@ -61,7 +61,7 @@ bool DependencyScan::RecomputeDirty(Edge* edge, string* err) {
 
   // Visit all inputs; we're dirty if any of the inputs are dirty.
   Node* most_recent_input = NULL;
-  for (vector<Node*>::iterator i = edge->inputs_.begin();
+  for (mblock_vector<Node*>::type::iterator i = edge->inputs_.begin();
        i != edge->inputs_.end(); ++i) {
     if (!(*i)->status_known()) {
       if (!(*i)->StatIfNecessary(disk_interface_, err))
@@ -204,7 +204,7 @@ bool DependencyScan::RecomputeOutputDirty(Edge* edge,
 }
 
 bool Edge::AllInputsReady() const {
-  for (vector<Node*>::const_iterator i = inputs_.begin();
+  for (mblock_vector<Node*>::type::const_iterator i = inputs_.begin();
        i != inputs_.end(); ++i) {
     if ((*i)->in_edge() && !(*i)->in_edge()->outputs_ready())
       return false;
@@ -222,9 +222,7 @@ struct EdgeEnv : public Env {
 
   /// Given a span of Nodes, construct a list of paths suitable for a command
   /// line.
-  string MakePathList(vector<Node*>::iterator begin,
-                      vector<Node*>::iterator end,
-                      char sep);
+  string MakePathList(Node** begin, Node** end, char sep);
 
  private:
   vector<string> lookups_;
@@ -237,12 +235,11 @@ string EdgeEnv::LookupVariable(const string& var) {
   if (var == "in" || var == "in_newline") {
     int explicit_deps_count = edge_->inputs_.size() - edge_->implicit_deps_ -
       edge_->order_only_deps_;
-    return MakePathList(edge_->inputs_.begin(),
-                        edge_->inputs_.begin() + explicit_deps_count,
+    return MakePathList(vec_begin(edge_->inputs_),
+                        vec_begin(edge_->inputs_) + explicit_deps_count,
                         var == "in" ? ' ' : '\n');
   } else if (var == "out") {
-    return MakePathList(edge_->outputs_.begin(),
-                        edge_->outputs_.end(),
+    return MakePathList(vec_begin(edge_->outputs_), vec_end(edge_->outputs_),
                         ' ');
   }
 
@@ -268,11 +265,9 @@ string EdgeEnv::LookupVariable(const string& var) {
   return edge_->env_->LookupWithFallback(var, eval, this);
 }
 
-string EdgeEnv::MakePathList(vector<Node*>::iterator begin,
-                             vector<Node*>::iterator end,
-                             char sep) {
+string EdgeEnv::MakePathList(Node** begin, Node** end, char sep) {
   string result;
-  for (vector<Node*>::iterator i = begin; i != end; ++i) {
+  for (Node** i = begin; i != end; ++i) {
     if (!result.empty())
       result.push_back(sep);
     const string& path = (*i)->PathDecanonicalized();
@@ -320,7 +315,7 @@ string Edge::GetUnescapedRspfile() {
 
 void Edge::Dump(const char* prefix) const {
   printf("%s[ ", prefix);
-  for (vector<Node*>::const_iterator i = inputs_.begin();
+  for (mblock_vector<Node*>::type::const_iterator i = inputs_.begin();
        i != inputs_.end() && *i != NULL; ++i) {
     printf("%s ", (*i)->path().c_str());
   }
@@ -429,7 +424,7 @@ bool ImplicitDepLoader::LoadDepFile(Edge* edge, const string& path,
   }
 
   // Preallocate space in edge->inputs_ to be filled in below.
-  vector<Node*>::iterator implicit_dep =
+  mblock_vector<Node*>::type::iterator implicit_dep =
       PreallocateSpace(edge, depfile.ins_.size());
 
   // Add all its in-edges.
@@ -465,7 +460,7 @@ bool ImplicitDepLoader::LoadDepsFromLog(Edge* edge, string* err) {
     return false;
   }
 
-  vector<Node*>::iterator implicit_dep =
+  mblock_vector<Node*>::type::iterator implicit_dep =
       PreallocateSpace(edge, deps->node_count);
   for (int i = 0; i < deps->node_count; ++i, ++implicit_dep) {
     Node* node = deps->nodes[i];
@@ -476,8 +471,8 @@ bool ImplicitDepLoader::LoadDepsFromLog(Edge* edge, string* err) {
   return true;
 }
 
-vector<Node*>::iterator ImplicitDepLoader::PreallocateSpace(Edge* edge,
-                                                            int count) {
+mblock_vector<Node*>::type::iterator ImplicitDepLoader::PreallocateSpace(
+    Edge* edge, int count) {
   edge->inputs_.insert(edge->inputs_.end() - edge->order_only_deps_,
                        (size_t)count, 0);
   edge->implicit_deps_ += count;

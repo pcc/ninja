@@ -418,17 +418,18 @@ int NinjaMain::ToolMSVC(int argc, char* argv[]) {
 }
 #endif
 
-int ToolTargetsList(const vector<Node*>& nodes, int depth, int indent) {
-  for (vector<Node*>::const_iterator n = nodes.begin();
-       n != nodes.end();
-       ++n) {
+int ToolTargetsList(Node* const* node_begin, Node* const* node_end, int depth,
+                    int indent) {
+  for (Node* const* n = node_begin; n != node_end; ++n) {
     for (int i = 0; i < indent; ++i)
       printf("  ");
     const char* target = (*n)->path().c_str();
     if ((*n)->in_edge()) {
       printf("%s: %s\n", target, (*n)->in_edge()->rule_->name().c_str());
       if (depth > 1 || depth <= 0)
-        ToolTargetsList((*n)->in_edge()->inputs_, depth - 1, indent + 1);
+        ToolTargetsList(vec_begin((*n)->in_edge()->inputs_),
+                        vec_end((*n)->in_edge()->inputs_), depth - 1,
+                        indent + 1);
     } else {
       printf("%s\n", target);
     }
@@ -439,7 +440,7 @@ int ToolTargetsList(const vector<Node*>& nodes, int depth, int indent) {
 int ToolTargetsSourceList(State* state) {
   for (mblock_vector<Edge*>::type::iterator e = state->edges_.begin();
        e != state->edges_.end(); ++e) {
-    for (vector<Node*>::iterator inps = (*e)->inputs_.begin();
+    for (mblock_vector<Node*>::type::iterator inps = (*e)->inputs_.begin();
          inps != (*e)->inputs_.end(); ++inps) {
       if (!(*inps)->in_edge())
         printf("%s\n", (*inps)->path().c_str());
@@ -557,7 +558,8 @@ int NinjaMain::ToolTargets(int argc, char* argv[]) {
   string err;
   vector<Node*> root_nodes = state_->RootNodes(&err);
   if (err.empty()) {
-    return ToolTargetsList(root_nodes, depth, 0);
+    return ToolTargetsList(vec_begin(root_nodes), vec_end(root_nodes), depth,
+                           0);
   } else {
     Error("%s", err.c_str());
     return 1;
@@ -570,7 +572,7 @@ void PrintCommands(Edge* edge, set<Edge*>* seen) {
   if (!seen->insert(edge).second)
     return;
 
-  for (vector<Node*>::iterator in = edge->inputs_.begin();
+  for (mblock_vector<Node*>::type::iterator in = edge->inputs_.begin();
        in != edge->inputs_.end(); ++in)
     PrintCommands((*in)->in_edge(), seen);
 

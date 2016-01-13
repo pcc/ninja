@@ -91,7 +91,7 @@ Pool* State::LookupPool(const string& pool_name) {
 }
 
 Edge* State::AddEdge(const Rule* rule) {
-  Edge* edge = new (*mb_) Edge();
+  Edge* edge = new (*mb_) Edge(mb_);
   edge->rule_ = rule;
   edge->pool_ = &default_pool_;
   edge->env_ = &bindings_;
