@@ -29,7 +29,7 @@
 
 bool Node::Stat(DiskInterface* disk_interface, string* err) {
   METRIC_RECORD("node stat");
-  return (mtime_ = disk_interface->Stat(path_, err)) != -1;
+  return (mtime_ = disk_interface->Stat(path_.c_str(), err)) != -1;
 }
 
 bool DependencyScan::RecomputeDirty(Edge* edge, string* err) {
@@ -169,7 +169,7 @@ bool DependencyScan::RecomputeOutputDirty(Edge* edge,
     // considered dirty if an input was modified since the previous run.
     bool used_restat = false;
     if (edge->GetBindingBool("restat") && build_log() &&
-        (entry = build_log()->LookupByOutput(output->path()))) {
+        (entry = build_log()->LookupByOutput(output->path().c_str()))) {
       output_mtime = entry->restat_mtime;
       used_restat = true;
     }
@@ -188,7 +188,7 @@ bool DependencyScan::RecomputeOutputDirty(Edge* edge,
   // But if this is a generator rule, the command changing does not make us
   // dirty.
   if (!edge->GetBindingBool("generator") && build_log()) {
-    if (entry || (entry = build_log()->LookupByOutput(output->path()))) {
+    if (entry || (entry = build_log()->LookupByOutput(output->path().c_str()))) {
       if (BuildLog::LogEntry::HashCommand(command) != entry->command_hash) {
         EXPLAIN("command line changed for %s", output->path().c_str());
         return true;
@@ -348,8 +348,8 @@ bool Edge::use_console() const {
 }
 
 // static
-string Node::PathDecanonicalized(const string& path, unsigned int slash_bits) {
-  string result = path;
+string Node::PathDecanonicalized(StringPiece path, unsigned int slash_bits) {
+  string result = path.AsString();
 #ifdef _WIN32
   unsigned int mask = 1;
   for (char* c = &result[0]; (c = strchr(c, '/')) != NULL;) {
@@ -373,7 +373,7 @@ void Node::Dump(const char* prefix) const {
     printf("no in-edge\n");
   }
   printf(" out edges:\n");
-  for (vector<Edge*>::const_iterator e = out_edges().begin();
+  for (mblock_vector<Edge*>::type::const_iterator e = out_edges().begin();
        e != out_edges().end() && *e != NULL; ++e) {
     (*e)->Dump(" +- ");
   }

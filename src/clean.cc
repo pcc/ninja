@@ -122,7 +122,7 @@ int Cleaner::CleanAll(bool generator) {
       continue;
     for (vector<Node*>::iterator out_node = (*e)->outputs_.begin();
          out_node != (*e)->outputs_.end(); ++out_node) {
-      Remove((*out_node)->path());
+      Remove((*out_node)->path().c_str());
     }
 
     RemoveEdgeFiles(*e);
@@ -135,7 +135,7 @@ void Cleaner::DoCleanTarget(Node* target) {
   if (Edge* e = target->in_edge()) {
     // Do not try to remove phony targets
     if (!e->is_phony()) {
-      Remove(target->path());
+      Remove(target->path().c_str());
       RemoveEdgeFiles(e);
     }
     for (vector<Node*>::iterator n = e->inputs_.begin(); n != e->inputs_.end();
@@ -203,7 +203,7 @@ void Cleaner::DoCleanRule(const Rule* rule) {
     if ((*e)->rule().name() == rule->name()) {
       for (vector<Node*>::iterator out_node = (*e)->outputs_.begin();
            out_node != (*e)->outputs_.end(); ++out_node) {
-        Remove((*out_node)->path());
+        Remove((*out_node)->path().c_str());
         RemoveEdgeFiles(*e);
       }
     }

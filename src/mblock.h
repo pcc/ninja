@@ -1,9 +1,13 @@
 #ifndef NINJA_MBLOCK_H_
 #define NINJA_MBLOCK_H_
 
+#include <string>
+#include <vector>
+
 #include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 struct mblock {
   void* begin;
@@ -12,10 +16,11 @@ struct mblock {
   mblock(void *begin, void *end) : begin(begin), end(end) {}
 
   void* allocate(size_t size, size_t align) {
-    void* mem = begin;
-
     uintptr_t begin_uptr = reinterpret_cast<uintptr_t>(begin);
-    begin_uptr = (begin_uptr + size + align - 1) & -align;
+    begin_uptr = (begin_uptr + align - 1) & -align;
+    void *mem = reinterpret_cast<void *>(begin_uptr);
+
+    begin_uptr += size;
     begin = reinterpret_cast<void *>(begin_uptr);
 
     assert(begin < end);
@@ -41,7 +46,7 @@ struct mblock_allocator {
   template <class U>
   mblock_allocator(const mblock_allocator<U> &other) : mb(other.mb) {}
   T* allocate(size_t n) {
-    return static_cast<T *>(mb->allocate(n, __alignof__(T)));
+    return static_cast<T *>(mb->allocate(n * sizeof(T), __alignof__(T)));
   }
   void deallocate(T* p, size_t n) {}
 
@@ -65,6 +70,27 @@ struct mblock_allocator {
   struct rebind {
     typedef mblock_allocator<U> other;
   };
+
+  template <class U, class A1>
+  void construct(U *p, const A1 &arg) {
+    new (p) U(arg);
+  }
+
+  template <class U>
+  void destroy(U *p) {
+    p->~U();
+  }
+
+  size_t max_size() const {
+    return -1;
+  }
+};
+
+typedef std::basic_string<char, std::char_traits<char>, mblock_allocator<char> >
+    mblock_string;
+template <typename T>
+struct mblock_vector {
+  typedef std::vector<T, mblock_allocator<T> > type;
 };
 
 #endif

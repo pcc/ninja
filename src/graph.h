@@ -20,6 +20,7 @@
 using namespace std;
 
 #include "eval_env.h"
+#include "mblock.h"
 #include "timestamp.h"
 
 struct BuildLog;
@@ -33,12 +34,13 @@ struct State;
 /// Information about a node in the dependency graph: the file, whether
 /// it's dirty, mtime, etc.
 struct Node {
-  Node(const string& path, unsigned int slash_bits)
-      : path_(path),
+  Node(mblock *mb, const string& path, unsigned int slash_bits)
+      : path_(path.c_str(), mb),
         slash_bits_(slash_bits),
         mtime_(-1),
         dirty_(false),
         in_edge_(NULL),
+        out_edges_(mb),
         id_(-1) {}
 
   /// Return false on error.
@@ -70,12 +72,12 @@ struct Node {
     return mtime_ != -1;
   }
 
-  const string& path() const { return path_; }
+  const mblock_string& path() const { return path_; }
   /// Get |path()| but use slash_bits to convert back to original slash styles.
   string PathDecanonicalized() const {
     return PathDecanonicalized(path_, slash_bits_);
   }
-  static string PathDecanonicalized(const string& path,
+  static string PathDecanonicalized(StringPiece path,
                                     unsigned int slash_bits);
   unsigned int slash_bits() const { return slash_bits_; }
 
@@ -91,13 +93,13 @@ struct Node {
   int id() const { return id_; }
   void set_id(int id) { id_ = id; }
 
-  const vector<Edge*>& out_edges() const { return out_edges_; }
+  const mblock_vector<Edge*>::type& out_edges() const { return out_edges_; }
   void AddOutEdge(Edge* edge) { out_edges_.push_back(edge); }
 
   void Dump(const char* prefix="") const;
 
 private:
-  string path_;
+  mblock_string path_;
 
   /// Set bits starting from lowest for backslashes that were normalized to
   /// forward slashes by CanonicalizePath. See |PathDecanonicalized|.
@@ -119,7 +121,7 @@ private:
   Edge* in_edge_;
 
   /// All Edges that use this Node as an input.
-  vector<Edge*> out_edges_;
+  mblock_vector<Edge*>::type out_edges_;
 
   /// A dense integer id for the node, assigned and used by DepsLog.
   int id_;

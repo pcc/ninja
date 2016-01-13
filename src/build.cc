@@ -272,8 +272,8 @@ bool Plan::AddSubTarget(Node* node, vector<Node*>* stack, string* err) {
     if (node->dirty()) {
       string referenced;
       if (!stack->empty())
-        referenced = ", needed by '" + stack->back()->path() + "',";
-      *err = "'" + node->path() + "'" + referenced + " missing "
+        referenced = string(", needed by '") + stack->back()->path().c_str() + "',";
+      *err = string("'") + node->path().c_str() + "'" + referenced + " missing "
              "and no known rule to make it";
     }
     return false;
@@ -344,7 +344,7 @@ bool Plan::CheckDependencyCycle(Node* node, const vector<Node*>& stack,
   for (vector<Node*>::const_iterator i = cycle.begin(); i != cycle.end(); ++i) {
     if (i != cycle.begin())
       err->append(" -> ");
-    err->append((*i)->path());
+    err->append((*i)->path().c_str());
   }
   return true;
 }
@@ -398,7 +398,7 @@ void Plan::EdgeFinished(Edge* edge) {
 
 void Plan::NodeFinished(Node* node) {
   // See if we we want any edges from this node.
-  for (vector<Edge*>::const_iterator oe = node->out_edges().begin();
+  for (mblock_vector<Edge*>::type::const_iterator oe = node->out_edges().begin();
        oe != node->out_edges().end(); ++oe) {
     map<Edge*, bool>::iterator want_e = want_.find(*oe);
     if (want_e == want_.end())
@@ -420,7 +420,7 @@ void Plan::NodeFinished(Node* node) {
 bool Plan::CleanNode(DependencyScan* scan, Node* node, string* err) {
   node->set_dirty(false);
 
-  for (vector<Edge*>::const_iterator oe = node->out_edges().begin();
+  for (mblock_vector<Edge*>::type::const_iterator oe = node->out_edges().begin();
        oe != node->out_edges().end(); ++oe) {
     // Don't process edges that we don't actually want.
     map<Edge*, bool>::iterator want_e = want_.find(*oe);
@@ -572,11 +572,11 @@ void Builder::Cleanup() {
         // mentioned in a depfile, and the command touches its depfile
         // but is interrupted before it touches its output file.)
         string err;
-        TimeStamp new_mtime = disk_interface_->Stat((*o)->path(), &err);
+        TimeStamp new_mtime = disk_interface_->Stat((*o)->path().c_str(), &err);
         if (new_mtime == -1)  // Log and ignore Stat() errors.
           Error("%s", err.c_str());
         if (!depfile.empty() || (*o)->mtime() != new_mtime)
-          disk_interface_->RemoveFile((*o)->path());
+          disk_interface_->RemoveFile((*o)->path().c_str());
       }
       if (!depfile.empty())
         disk_interface_->RemoveFile(depfile);
@@ -711,7 +711,7 @@ bool Builder::StartEdge(Edge* edge, string* err) {
   // XXX: this will block; do we care?
   for (vector<Node*>::iterator o = edge->outputs_.begin();
        o != edge->outputs_.end(); ++o) {
-    if (!disk_interface_->MakeDirs((*o)->path()))
+    if (!disk_interface_->MakeDirs((*o)->path().c_str()))
       return false;
   }
 
@@ -773,7 +773,7 @@ bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
 
     for (vector<Node*>::iterator o = edge->outputs_.begin();
          o != edge->outputs_.end(); ++o) {
-      TimeStamp new_mtime = disk_interface_->Stat((*o)->path(), err);
+      TimeStamp new_mtime = disk_interface_->Stat((*o)->path().c_str(), err);
       if (new_mtime == -1)
         return false;
       if ((*o)->mtime() == new_mtime) {
@@ -791,7 +791,7 @@ bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
       // (existing) non-order-only input or the depfile.
       for (vector<Node*>::iterator i = edge->inputs_.begin();
            i != edge->inputs_.end() - edge->order_only_deps_; ++i) {
-        TimeStamp input_mtime = disk_interface_->Stat((*i)->path(), err);
+        TimeStamp input_mtime = disk_interface_->Stat((*i)->path().c_str(), err);
         if (input_mtime == -1)
           return false;
         if (input_mtime > restat_mtime)
@@ -831,7 +831,7 @@ bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
   if (!deps_type.empty() && !config_.dry_run) {
     assert(edge->outputs_.size() == 1 && "should have been rejected by parser");
     Node* out = edge->outputs_[0];
-    TimeStamp deps_mtime = disk_interface_->Stat(out->path(), err);
+    TimeStamp deps_mtime = disk_interface_->Stat(out->path().c_str(), err);
     if (deps_mtime == -1)
       return false;
     if (!scan_.deps_log()->RecordDeps(out, deps_mtime, deps_nodes)) {

@@ -21,6 +21,8 @@ using namespace std;
 
 #include <string.h>
 
+#include "mblock.h"
+
 /// StringPiece represents a slice of a string whose memory is managed
 /// externally.  It is useful for reducing the number of std::strings
 /// we need to allocate.
@@ -29,6 +31,7 @@ struct StringPiece {
 
   /// The constructors intentionally allow for implicit conversions.
   StringPiece(const string& str) : str_(str.data()), len_(str.size()) {}
+  StringPiece(const mblock_string& str) : str_(str.data()), len_(str.size()) {}
   StringPiece(const char* str) : str_(str), len_(strlen(str)) {}
 
   StringPiece(const char* str, size_t len) : str_(str), len_(len) {}

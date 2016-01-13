@@ -79,7 +79,7 @@ string GetSystemTempDir() {
 
 }  // anonymous namespace
 
-StateTestWithBuiltinRules::StateTestWithBuiltinRules() {
+StateTestWithBuiltinRules::StateTestWithBuiltinRules() : state_(&test_mb) {
   AddCatRule(&state_);
 }
 
@@ -114,7 +114,7 @@ void VerifyGraph(const State& state) {
     // Check that the edge's inputs have the edge as out-edge.
     for (vector<Node*>::const_iterator in_node = (*e)->inputs_.begin();
          in_node != (*e)->inputs_.end(); ++in_node) {
-      const vector<Edge*>& out_edges = (*in_node)->out_edges();
+      const mblock_vector<Edge*>::type& out_edges = (*in_node)->out_edges();
       EXPECT_NE(std::find(out_edges.begin(), out_edges.end(), *e),
                 out_edges.end());
     }
@@ -227,5 +227,5 @@ void ScopedTempDir::Cleanup() {
   temp_dir_name_.clear();
 }
 
-static char test_mb_data[1048576];
-mblock test_mb(test_mb_data, test_mb_data + 1048576);
+static char test_mb_data[10485760];
+mblock test_mb(test_mb_data, test_mb_data + 10485760);

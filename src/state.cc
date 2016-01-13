@@ -73,7 +73,7 @@ Pool State::kDefaultPool("", 0);
 Pool State::kConsolePool("console", 1);
 const Rule State::kPhonyRule("phony");
 
-State::State() {
+State::State(mblock* mb) : mb_(mb) {
   bindings_.AddRule(&kPhonyRule);
   AddPool(&kDefaultPool);
   AddPool(&kConsolePool);
@@ -104,7 +104,7 @@ Node* State::GetNode(StringPiece path, unsigned int slash_bits) {
   Node* node = LookupNode(path);
   if (node)
     return node;
-  node = new Node(path.AsString(), slash_bits);
+  node = new Node(mb_, path.AsString(), slash_bits);
   paths_[node->path()] = node;
   return node;
 }

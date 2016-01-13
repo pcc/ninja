@@ -23,8 +23,7 @@ void GraphViz::AddTarget(Node* node) {
   if (visited_nodes_.find(node) != visited_nodes_.end())
     return;
 
-  string pathstr = node->path();
-  replace(pathstr.begin(), pathstr.end(), '\\', '/');
+  string pathstr = node->PathDecanonicalized();
   printf("\"%p\" [label=\"%s\"]\n", node, pathstr.c_str());
   visited_nodes_.insert(node);
 

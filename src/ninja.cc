@@ -180,7 +180,7 @@ void NinjaMain::InitMemory() {
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
   mb_ = new (mem) mblock(static_cast<char*>(mem) + sizeof(mblock),
                          static_cast<char*>(mem) + 1024 * 1024 * 1024);
-  state_ = new (*mb_) State;
+  state_ = new (*mb_) State(mb_);
 }
 
 /// Subtools, accessible via "-t foo".
@@ -317,7 +317,7 @@ Node* NinjaMain::CollectTarget(const char* cpath, string* err) {
     } else {
       Node* suggestion = state_->SpellcheckNode(path);
       if (suggestion) {
-        *err += ", did you mean '" + suggestion->path() + "'?";
+        *err += string(", did you mean '") + suggestion->path().c_str() + "'?";
       }
     }
     return NULL;
@@ -384,7 +384,8 @@ int NinjaMain::ToolQuery(int argc, char* argv[]) {
       }
     }
     printf("  outputs:\n");
-    for (vector<Edge*>::const_iterator edge = node->out_edges().begin();
+    for (mblock_vector<Edge*>::type::const_iterator edge =
+             node->out_edges().begin();
          edge != node->out_edges().end(); ++edge) {
       for (vector<Node*>::iterator out = (*edge)->outputs_.begin();
            out != (*edge)->outputs_.end(); ++out) {
@@ -456,7 +457,7 @@ int ToolTargetsList(State* state, const string& rule_name) {
     if ((*e)->rule_->name() == rule_name) {
       for (vector<Node*>::iterator out_node = (*e)->outputs_.begin();
            out_node != (*e)->outputs_.end(); ++out_node) {
-        rules.insert((*out_node)->path());
+        rules.insert((*out_node)->path().c_str());
       }
     }
   }
@@ -509,7 +510,7 @@ int NinjaMain::ToolDeps(int argc, char** argv) {
     }
 
     string err;
-    TimeStamp mtime = disk_interface.Stat((*it)->path(), &err);
+    TimeStamp mtime = disk_interface.Stat((*it)->path().c_str(), &err);
     if (mtime == -1)
       Error("%s", err.c_str());  // Log and ignore Stat() errors;
     printf("%s: #deps %d, deps mtime %d (%s)\n",

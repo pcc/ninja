@@ -86,7 +86,7 @@ struct State {
   static Pool kConsolePool;
   static const Rule kPhonyRule;
 
-  State();
+  State(mblock* mb);
 
   void AddPool(Pool* pool);
   Pool* LookupPool(const string& pool_name);
@@ -125,6 +125,8 @@ struct State {
 
   BindingEnv bindings_;
   vector<Node*> defaults_;
+
+  mblock* mb_;
 };
 
 #endif  // NINJA_STATE_H_

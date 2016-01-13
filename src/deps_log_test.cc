@@ -38,7 +38,7 @@ struct DepsLogTest : public testing::Test {
 };
 
 TEST_F(DepsLogTest, WriteRead) {
-  State state1;
+  State state1(&test_mb);
   DepsLog log1;
   string err;
   EXPECT_TRUE(log1.OpenForWrite(kTestFilename, &err));
@@ -65,7 +65,7 @@ TEST_F(DepsLogTest, WriteRead) {
 
   log1.Close();
 
-  State state2;
+  State state2(&test_mb);
   DepsLog log2;
   EXPECT_TRUE(log2.Load(kTestFilename, &state2, &err));
   ASSERT_EQ("", err);
@@ -90,7 +90,7 @@ TEST_F(DepsLogTest, WriteRead) {
 TEST_F(DepsLogTest, LotsOfDeps) {
   const int kNumDeps = 100000;  // More than 64k.
 
-  State state1;
+  State state1(&test_mb);
   DepsLog log1;
   string err;
   EXPECT_TRUE(log1.OpenForWrite(kTestFilename, &err));
@@ -111,7 +111,7 @@ TEST_F(DepsLogTest, LotsOfDeps) {
 
   log1.Close();
 
-  State state2;
+  State state2(&test_mb);
   DepsLog log2;
   EXPECT_TRUE(log2.Load(kTestFilename, &state2, &err));
   ASSERT_EQ("", err);
@@ -125,7 +125,7 @@ TEST_F(DepsLogTest, DoubleEntry) {
   // Write some deps to the file and grab its size.
   int file_size;
   {
-    State state;
+    State state(&test_mb);
     DepsLog log;
     string err;
     EXPECT_TRUE(log.OpenForWrite(kTestFilename, &err));
@@ -145,7 +145,7 @@ TEST_F(DepsLogTest, DoubleEntry) {
 
   // Now reload the file, and readd the same deps.
   {
-    State state;
+    State state(&test_mb);
     DepsLog log;
     string err;
     EXPECT_TRUE(log.Load(kTestFilename, &state, &err));
@@ -178,7 +178,7 @@ TEST_F(DepsLogTest, Recompact) {
   // Write some deps to the file and grab its size.
   int file_size;
   {
-    State state;
+    State state(&test_mb);
     ASSERT_NO_FATAL_FAILURE(AssertParse(&state, kManifest));
     DepsLog log;
     string err;
@@ -206,7 +206,7 @@ TEST_F(DepsLogTest, Recompact) {
   // Now reload the file, and add slighly different deps.
   int file_size_2;
   {
-    State state;
+    State state(&test_mb);
     ASSERT_NO_FATAL_FAILURE(AssertParse(&state, kManifest));
     DepsLog log;
     string err;
@@ -231,7 +231,7 @@ TEST_F(DepsLogTest, Recompact) {
   // recompact.
   int file_size_3;
   {
-    State state;
+    State state(&test_mb);
     ASSERT_NO_FATAL_FAILURE(AssertParse(&state, kManifest));
     DepsLog log;
     string err;
@@ -280,7 +280,7 @@ TEST_F(DepsLogTest, Recompact) {
   // Now reload the file and recompact with an empty manifest. The previous
   // entries should be removed.
   {
-    State state;
+    State state(&test_mb);
     // Intentionally not parsing kManifest here.
     DepsLog log;
     string err;
@@ -342,7 +342,7 @@ TEST_F(DepsLogTest, InvalidHeader) {
 
     string err;
     DepsLog log;
-    State state;
+    State state(&test_mb);
     ASSERT_TRUE(log.Load(kTestFilename, &state, &err));
     EXPECT_EQ("bad deps log signature or version; starting over", err);
   }
@@ -352,7 +352,7 @@ TEST_F(DepsLogTest, InvalidHeader) {
 TEST_F(DepsLogTest, Truncated) {
   // Create a file with some entries.
   {
-    State state;
+    State state(&test_mb);
     DepsLog log;
     string err;
     EXPECT_TRUE(log.OpenForWrite(kTestFilename, &err));
@@ -384,7 +384,7 @@ TEST_F(DepsLogTest, Truncated) {
     string err;
     ASSERT_TRUE(Truncate(kTestFilename, size, &err));
 
-    State state;
+    State state(&test_mb);
     DepsLog log;
     EXPECT_TRUE(log.Load(kTestFilename, &state, &err));
     if (!err.empty()) {
@@ -411,7 +411,7 @@ TEST_F(DepsLogTest, Truncated) {
 TEST_F(DepsLogTest, TruncatedRecovery) {
   // Create a file with some entries.
   {
-    State state;
+    State state(&test_mb);
     DepsLog log;
     string err;
     EXPECT_TRUE(log.OpenForWrite(kTestFilename, &err));
@@ -438,7 +438,7 @@ TEST_F(DepsLogTest, TruncatedRecovery) {
 
   // Load the file again, add an entry.
   {
-    State state;
+    State state(&test_mb);
     DepsLog log;
     string err;
     EXPECT_TRUE(log.Load(kTestFilename, &state, &err));
@@ -463,7 +463,7 @@ TEST_F(DepsLogTest, TruncatedRecovery) {
   // Load the file a third time to verify appending after a mangled
   // entry doesn't break things.
   {
-    State state;
+    State state(&test_mb);
     DepsLog log;
     string err;
     EXPECT_TRUE(log.Load(kTestFilename, &state, &err));

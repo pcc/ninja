@@ -19,7 +19,7 @@
 namespace {
 
 TEST(State, Basic) {
-  State state;
+  State state(&test_mb);
 
   EvalString command;
   command.AddText("cat ");

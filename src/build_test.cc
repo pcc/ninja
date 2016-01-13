@@ -332,7 +332,7 @@ TEST_F(PlanTest, PoolsWithDepthTwo) {
     Edge *edge = edges[i];
     ASSERT_EQ("in",  edge->inputs_[0]->path());
     string base_name(i < 2 ? "out" : "outb");
-    ASSERT_EQ(base_name + string(1, '1' + (i % 2)), edge->outputs_[0]->path());
+    ASSERT_EQ(base_name + string(1, '1' + (i % 2)), edge->outputs_[0]->path().c_str());
   }
 
   // outb3 is exempt because it has an empty pool
@@ -518,7 +518,7 @@ struct BuildTest : public StateTestWithBuiltinRules, public BuildLogUser {
 void BuildTest::RebuildTarget(const string& target, const char* manifest,
                               const char* log_path, const char* deps_path,
                               State* state) {
-  State local_state, *pstate = &local_state;
+  State local_state(&test_mb), *pstate = &local_state;
   if (state)
     pstate = state;
   ASSERT_NO_FATAL_FAILURE(AddCatRule(pstate));
@@ -569,7 +569,7 @@ bool FakeCommandRunner::StartCommand(Edge* edge) {
       edge->rule().name() == "touch-interrupt") {
     for (vector<Node*>::iterator out = edge->outputs_.begin();
          out != edge->outputs_.end(); ++out) {
-      fs_->Create((*out)->path(), "");
+      fs_->Create((*out)->path().c_str(), "");
     }
   } else if (edge->rule().name() == "true" ||
              edge->rule().name() == "fail" ||
@@ -1115,7 +1115,7 @@ TEST_F(BuildTest, PoolEdgesReadyButNotWanted) {
 
   fs_.RemoveFile("B.d.stamp");
 
-  State save_state;
+  State save_state(&test_mb);
   RebuildTarget("final.stamp", manifest, NULL, NULL, &save_state);
   EXPECT_GE(save_state.LookupPool("some_pool")->current_use(), 0);
 }
@@ -1674,7 +1674,7 @@ TEST_F(BuildWithDepsLogTest, Straightforward) {
       "  deps = gcc\n"
       "  depfile = in1.d\n";
   {
-    State state;
+    State state(&test_mb);
     ASSERT_NO_FATAL_FAILURE(AddCatRule(&state));
     ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
 
@@ -1700,7 +1700,7 @@ TEST_F(BuildWithDepsLogTest, Straightforward) {
   }
 
   {
-    State state;
+    State state(&test_mb);
     ASSERT_NO_FATAL_FAILURE(AddCatRule(&state));
     ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
 
@@ -1745,7 +1745,7 @@ TEST_F(BuildWithDepsLogTest, ObsoleteDeps) {
     fs_.Create("in1", "");
     fs_.Create("in1.d", "out: ");
 
-    State state;
+    State state(&test_mb);
     ASSERT_NO_FATAL_FAILURE(AddCatRule(&state));
     ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
 
@@ -1775,7 +1775,7 @@ TEST_F(BuildWithDepsLogTest, ObsoleteDeps) {
   EXPECT_EQ(0, fs_.Stat("in1.d", &err));
 
   {
-    State state;
+    State state(&test_mb);
     ASSERT_NO_FATAL_FAILURE(AddCatRule(&state));
     ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
 
@@ -1813,7 +1813,7 @@ TEST_F(BuildWithDepsLogTest, DepsIgnoredInDryRun) {
   fs_.Tick();
   fs_.Create("in1", "");
 
-  State state;
+  State state(&test_mb);
   ASSERT_NO_FATAL_FAILURE(AddCatRule(&state));
   ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
 
@@ -1868,7 +1868,7 @@ TEST_F(BuildWithDepsLogTest, RestatDepfileDependencyDepsLog) {
       "  deps = gcc\n"
       "  depfile = in1.d\n";
   {
-    State state;
+    State state(&test_mb);
     ASSERT_NO_FATAL_FAILURE(AddCatRule(&state));
     ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
 
@@ -1890,7 +1890,7 @@ TEST_F(BuildWithDepsLogTest, RestatDepfileDependencyDepsLog) {
   }
 
   {
-    State state;
+    State state(&test_mb);
     ASSERT_NO_FATAL_FAILURE(AddCatRule(&state));
     ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
 
@@ -1928,7 +1928,7 @@ TEST_F(BuildWithDepsLogTest, DepFileOKDepsLog) {
   fs_.Create("foo.c", "");
 
   {
-    State state;
+    State state(&test_mb);
     ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
 
     // Run the build once, everything should be ok.
@@ -1949,7 +1949,7 @@ TEST_F(BuildWithDepsLogTest, DepFileOKDepsLog) {
   }
 
   {
-    State state;
+    State state(&test_mb);
     ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
 
     DepsLog deps_log;
@@ -1990,7 +1990,7 @@ TEST_F(BuildWithDepsLogTest, DepFileDepsLogCanonicalize) {
   fs_.Create("x/y/z/foo.c", "");
 
   {
-    State state;
+    State state(&test_mb);
     ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
 
     // Run the build once, everything should be ok.
@@ -2013,7 +2013,7 @@ TEST_F(BuildWithDepsLogTest, DepFileDepsLogCanonicalize) {
   }
 
   {
-    State state;
+    State state(&test_mb);
     ASSERT_NO_FATAL_FAILURE(AssertParse(&state, manifest));
 
     DepsLog deps_log;
