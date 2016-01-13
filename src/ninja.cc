@@ -24,9 +24,11 @@
 #include <windows.h>
 #elif defined(_AIX)
 #include "getopt.h"
+#include <sys/mman.h>
 #include <unistd.h>
 #else
 #include <getopt.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #endif
 
@@ -40,6 +42,7 @@
 #include "graph.h"
 #include "graphviz.h"
 #include "manifest_parser.h"
+#include "mblock.h"
 #include "metrics.h"
 #include "state.h"
 #include "util.h"
@@ -76,7 +79,9 @@ struct Options {
 /// to poke into these, so store them as fields on an object.
 struct NinjaMain : public BuildLogUser {
   NinjaMain(const char* ninja_command, const BuildConfig& config) :
-      ninja_command_(ninja_command), config_(config) {}
+      ninja_command_(ninja_command), config_(config) {
+    InitMemory();
+  }
 
   /// Command line used to run Ninja.
   const char* ninja_command_;
@@ -84,8 +89,10 @@ struct NinjaMain : public BuildLogUser {
   /// Build configuration set from flags (e.g. parallelism).
   const BuildConfig& config_;
 
+  mblock *mb_;
+
   /// Loaded state (rules, nodes).
-  State state_;
+  State *state_;
 
   /// Functions for accesssing the disk.
   RealDiskInterface disk_interface_;
@@ -145,7 +152,7 @@ struct NinjaMain : public BuildLogUser {
   void DumpMetrics();
 
   virtual bool IsPathDead(StringPiece s) const {
-    Node* n = state_.LookupNode(s);
+    Node* n = state_->LookupNode(s);
     if (!n || !n->in_edge())
       return false;
     // Just checking n isn't enough: If an old output is both in the build log
@@ -163,7 +170,18 @@ struct NinjaMain : public BuildLogUser {
       Error("%s", err.c_str());  // Log and ignore Stat() errors.
     return mtime == 0;
   }
+
+  void InitMemory();
 };
+
+void NinjaMain::InitMemory() {
+  void* mem = mmap(reinterpret_cast<void*>(1 * 1024 * 1024 * 1024),
+                   1 * 1024 * 1024 * 1024, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+  mb_ = new (mem) mblock(static_cast<char*>(mem) + sizeof(mblock),
+                         static_cast<char*>(mem) + 1024 * 1024 * 1024);
+  state_ = new (*mb_) State;
+}
 
 /// Subtools, accessible via "-t foo".
 struct Tool {
@@ -244,11 +262,11 @@ bool NinjaMain::RebuildManifest(const char* input_file, string* err) {
   unsigned int slash_bits;  // Unused because this path is only used for lookup.
   if (!CanonicalizePath(&path, &slash_bits, err))
     return false;
-  Node* node = state_.LookupNode(path);
+  Node* node = state_->LookupNode(path);
   if (!node)
     return false;
 
-  Builder builder(&state_, config_, &build_log_, &deps_log_, &disk_interface_);
+  Builder builder(state_, config_, &build_log_, &deps_log_, &disk_interface_);
   if (!builder.AddTarget(node, err))
     return false;
 
@@ -274,7 +292,7 @@ Node* NinjaMain::CollectTarget(const char* cpath, string* err) {
     first_dependent = true;
   }
 
-  Node* node = state_.LookupNode(path);
+  Node* node = state_->LookupNode(path);
   if (node) {
     if (first_dependent) {
       if (node->out_edges().empty()) {
@@ -297,7 +315,7 @@ Node* NinjaMain::CollectTarget(const char* cpath, string* err) {
     } else if (path == "help") {
       *err += ", did you mean 'ninja -h'?";
     } else {
-      Node* suggestion = state_.SpellcheckNode(path);
+      Node* suggestion = state_->SpellcheckNode(path);
       if (suggestion) {
         *err += ", did you mean '" + suggestion->path() + "'?";
       }
@@ -309,7 +327,7 @@ Node* NinjaMain::CollectTarget(const char* cpath, string* err) {
 bool NinjaMain::CollectTargetsFromArgs(int argc, char* argv[],
                                        vector<Node*>* targets, string* err) {
   if (argc == 0) {
-    *targets = state_.DefaultNodes(err);
+    *targets = state_->DefaultNodes(err);
     return err->empty();
   }
 
@@ -383,7 +401,7 @@ int NinjaMain::ToolBrowse(int argc, char* argv[]) {
     Error("expected a target to browse");
     return 1;
   }
-  RunBrowsePython(&state_, ninja_command_, argv[0]);
+  RunBrowsePython(state_, ninja_command_, argv[0]);
   // If we get here, the browse failed.
   return 1;
 }
@@ -514,14 +532,14 @@ int NinjaMain::ToolTargets(int argc, char* argv[]) {
       if (argc > 1)
         rule = argv[1];
       if (rule.empty())
-        return ToolTargetsSourceList(&state_);
+        return ToolTargetsSourceList(state_);
       else
-        return ToolTargetsList(&state_, rule);
+        return ToolTargetsList(state_, rule);
     } else if (mode == "depth") {
       if (argc > 1)
         depth = atoi(argv[1]);
     } else if (mode == "all") {
-      return ToolTargetsList(&state_);
+      return ToolTargetsList(state_);
     } else {
       const char* suggestion =
           SpellcheckString(mode.c_str(), "rule", "depth", "all", NULL);
@@ -536,7 +554,7 @@ int NinjaMain::ToolTargets(int argc, char* argv[]) {
   }
 
   string err;
-  vector<Node*> root_nodes = state_.RootNodes(&err);
+  vector<Node*> root_nodes = state_->RootNodes(&err);
   if (err.empty()) {
     return ToolTargetsList(root_nodes, depth, 0);
   } else {
@@ -612,7 +630,7 @@ int NinjaMain::ToolClean(int argc, char* argv[]) {
     return 1;
   }
 
-  Cleaner cleaner(&state_, config_);
+  Cleaner cleaner(state_, config_);
   if (argc >= 1) {
     if (clean_rules)
       return cleaner.CleanRules(argc, argv);
@@ -646,8 +664,8 @@ int NinjaMain::ToolCompilationDatabase(int argc, char* argv[]) {
   }
 
   putchar('[');
-  for (vector<Edge*>::iterator e = state_.edges_.begin();
-       e != state_.edges_.end(); ++e) {
+  for (vector<Edge*>::iterator e = state_->edges_.begin();
+       e != state_->edges_.end(); ++e) {
     if ((*e)->inputs_.empty())
       continue;
     for (int i = 0; i != argc; ++i) {
@@ -875,7 +893,7 @@ bool NinjaMain::OpenDepsLog(bool recompact_only) {
     path = build_dir_ + "/" + path;
 
   string err;
-  if (!deps_log_.Load(path, &state_, &err)) {
+  if (!deps_log_.Load(path, state_, &err)) {
     Error("loading deps log %s: %s", path.c_str(), err.c_str());
     return false;
   }
@@ -906,14 +924,14 @@ void NinjaMain::DumpMetrics() {
   g_metrics->Report();
 
   printf("\n");
-  int count = (int)state_.paths_.size();
-  int buckets = (int)state_.paths_.bucket_count();
+  int count = (int)state_->paths_.size();
+  int buckets = (int)state_->paths_.bucket_count();
   printf("path->node hash load %.2f (%d entries / %d buckets)\n",
          count / (double) buckets, count, buckets);
 }
 
 bool NinjaMain::EnsureBuildDirExists() {
-  build_dir_ = state_.bindings_.LookupVariable("builddir");
+  build_dir_ = state_->bindings_.LookupVariable("builddir");
   if (!build_dir_.empty() && !config_.dry_run) {
     if (!disk_interface_.MakeDirs(build_dir_ + "/.") && errno != EEXIST) {
       Error("creating build directory %s: %s",
@@ -934,7 +952,7 @@ int NinjaMain::RunBuild(int argc, char** argv) {
 
   disk_interface_.AllowStatCache(g_experimental_statcache);
 
-  Builder builder(&state_, config_, &build_log_, &deps_log_, &disk_interface_);
+  Builder builder(state_, config_, &build_log_, &deps_log_, &disk_interface_);
   for (size_t i = 0; i < targets.size(); ++i) {
     if (!builder.AddTarget(targets[i], &err)) {
       if (!err.empty()) {
@@ -1113,7 +1131,7 @@ int real_main(int argc, char** argv) {
     NinjaMain ninja(ninja_command, config);
 
     RealFileReader file_reader;
-    ManifestParser parser(&ninja.state_, &file_reader,
+    ManifestParser parser(ninja.state_, &file_reader,
                           options.dupe_edges_should_err);
     string err;
     if (!parser.Load(options.input_file, &err)) {
