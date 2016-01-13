@@ -1143,6 +1143,12 @@ int real_main(int argc, char** argv) {
       return 1;
     }
 
+    FILE *dump = fopen("dump", "w");
+    fwrite(reinterpret_cast<void*>(1024 * 1024 * 1024),
+           reinterpret_cast<uintptr_t>(ninja.mb_->begin) - 1024 * 1024 * 1024,
+           1, dump);
+    fclose(dump);
+
     if (options.tool && options.tool->when == Tool::RUN_AFTER_LOAD)
       return (ninja.*options.tool->func)(argc, argv);
 
