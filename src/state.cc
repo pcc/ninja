@@ -92,7 +92,7 @@ Pool* State::LookupPool(const string& pool_name) {
 }
 
 Edge* State::AddEdge(const Rule* rule) {
-  Edge* edge = new Edge();
+  Edge* edge = new (*mb_) Edge();
   edge->rule_ = rule;
   edge->pool_ = &State::kDefaultPool;
   edge->env_ = &bindings_;
@@ -104,7 +104,7 @@ Node* State::GetNode(StringPiece path, unsigned int slash_bits) {
   Node* node = LookupNode(path);
   if (node)
     return node;
-  node = new Node(mb_, path.AsString(), slash_bits);
+  node = new (*mb_) Node(mb_, path.AsString(), slash_bits);
   paths_[node->path()] = node;
   return node;
 }

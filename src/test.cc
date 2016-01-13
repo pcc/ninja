@@ -227,5 +227,5 @@ void ScopedTempDir::Cleanup() {
   temp_dir_name_.clear();
 }
 
-static char test_mb_data[10485760];
-mblock test_mb(test_mb_data, test_mb_data + 10485760);
+static char test_mb_data[104857600];
+mblock test_mb(test_mb_data, test_mb_data + sizeof(test_mb_data));
