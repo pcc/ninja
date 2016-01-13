@@ -61,8 +61,7 @@ void Pool::Dump() const {
   }
 }
 
-// static
-bool Pool::WeightedEdgeCmp(const Edge* a, const Edge* b) {
+bool Pool::WeightedEdgeCmp::operator()(const Edge* a, const Edge* b) {
   if (!a) return b;
   if (!b) return false;
   int weight_diff = a->weight() - b->weight();

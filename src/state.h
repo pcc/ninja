@@ -39,7 +39,7 @@ struct Rule;
 struct Pool {
   Pool(mblock* mb, const string& name, int depth)
       : name_(name.c_str(), mb), current_use_(0), depth_(depth),
-        delayed_(&WeightedEdgeCmp) {}
+        delayed_(WeightedEdgeCmp(), mb) {}
 
   // A depth of 0 is infinite
   bool is_valid() const { return depth_ >= 0; }
@@ -75,9 +75,11 @@ struct Pool {
   int current_use_;
   int depth_;
 
-  static bool WeightedEdgeCmp(const Edge* a, const Edge* b);
+  struct WeightedEdgeCmp {
+    bool operator()(const Edge* a, const Edge* b);
+  };
 
-  typedef set<Edge*,bool(*)(const Edge*, const Edge*)> DelayedEdges;
+  typedef set<Edge*, WeightedEdgeCmp, mblock_allocator<Edge*> > DelayedEdges;
   DelayedEdges delayed_;
 };
 
