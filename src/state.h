@@ -87,7 +87,7 @@ struct Pool {
 struct State {
   Pool default_pool_;
   Pool console_pool_;
-  static const Rule kPhonyRule;
+  const Rule phony_rule_;
 
   State(mblock* mb);
 

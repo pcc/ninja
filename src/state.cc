@@ -68,11 +68,10 @@ bool Pool::WeightedEdgeCmp::operator()(const Edge* a, const Edge* b) {
   return ((weight_diff < 0) || (weight_diff == 0 && a < b));
 }
 
-const Rule State::kPhonyRule("phony");
-
 State::State(mblock* mb)
-    : default_pool_(mb, "", 0), console_pool_(mb, "console", 1), mb_(mb) {
-  bindings_.AddRule(&kPhonyRule);
+    : default_pool_(mb, "", 0), console_pool_(mb, "console", 1),
+      phony_rule_("phony"), mb_(mb) {
+  bindings_.AddRule(&phony_rule_);
   AddPool(&default_pool_);
   AddPool(&console_pool_);
 }

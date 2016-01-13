@@ -340,7 +340,7 @@ void Edge::Dump(const char* prefix) const {
 }
 
 bool Edge::is_phony() const {
-  return rule_ == &State::kPhonyRule;
+  return rule_->name() == "phony";
 }
 
 bool Edge::use_console() const {
@@ -488,7 +488,7 @@ void ImplicitDepLoader::CreatePhonyInEdge(Node* node) {
   if (node->in_edge())
     return;
 
-  Edge* phony_edge = state_->AddEdge(&State::kPhonyRule);
+  Edge* phony_edge = state_->AddEdge(&state_->phony_rule_);
   node->set_in_edge(phony_edge);
   phony_edge->outputs_.push_back(node);
 
