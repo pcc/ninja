@@ -106,14 +106,16 @@ struct hash<StringPiece> {
 /// owned externally (typically by the values).  Use like:
 /// ExternalStringHash<Foo*>::Type foos; to make foos into a hash
 /// mapping StringPiece => Foo*.
-template<typename V>
+template<typename V, typename Alloc = std::allocator<V> >
 struct ExternalStringHashMap {
 #if (__cplusplus >= 201103L) || (_MSC_VER >= 1900)
   typedef std::unordered_map<StringPiece, V> Type;
 #elif defined(_MSC_VER)
   typedef hash_map<StringPiece, V, StringPieceCmp> Type;
 #else
-  typedef hash_map<StringPiece, V> Type;
+  typedef hash_map<StringPiece, V, __gnu_cxx::hash<StringPiece>,
+                   std::equal_to<StringPiece>, Alloc>
+      Type;
 #endif
 };
 

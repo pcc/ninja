@@ -117,7 +117,7 @@ struct State {
   vector<Node*> DefaultNodes(string* error);
 
   /// Mapping of path -> Node.
-  typedef ExternalStringHashMap<Node*>::Type Paths;
+  typedef ExternalStringHashMap<Node*, mblock_allocator<Node*> >::Type Paths;
   Paths paths_;
 
   /// All the pools used in the graph.

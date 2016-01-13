@@ -70,7 +70,9 @@ bool Pool::WeightedEdgeCmp::operator()(const Edge* a, const Edge* b) {
 
 State::State(mblock* mb)
     : default_pool_(mb, "", 0), console_pool_(mb, "console", 1),
-      phony_rule_("phony"), mb_(mb) {
+      phony_rule_("phony"), paths_(100, __gnu_cxx::hash<StringPiece>(),
+                                   std::equal_to<StringPiece>(), mb),
+      mb_(mb) {
   bindings_.AddRule(&phony_rule_);
   AddPool(&default_pool_);
   AddPool(&console_pool_);
