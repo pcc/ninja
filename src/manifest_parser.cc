@@ -19,14 +19,15 @@
 #include <vector>
 
 #include "graph.h"
+#include "mblock.h"
 #include "metrics.h"
 #include "state.h"
 #include "util.h"
 #include "version.h"
 
-ManifestParser::ManifestParser(State* state, FileReader* file_reader,
+ManifestParser::ManifestParser(mblock* mb, State* state, FileReader* file_reader,
                                bool dupe_edge_should_err)
-    : state_(state), file_reader_(file_reader),
+    : mb_(mb), state_(state), file_reader_(file_reader),
       dupe_edge_should_err_(dupe_edge_should_err), quiet_(false) {
   env_ = &state->bindings_;
 }
@@ -380,7 +381,7 @@ bool ManifestParser::ParseFileInclude(bool new_scope, string* err) {
     return false;
   string path = eval.Evaluate(env_);
 
-  ManifestParser subparser(state_, file_reader_);
+  ManifestParser subparser(mb_, state_, file_reader_);
   if (new_scope) {
     subparser.env_ = new BindingEnv(env_);
   } else {

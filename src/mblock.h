@@ -24,11 +24,11 @@ struct mblock {
   }
 };
 
-void* operator new(size_t size, mblock &mb) {
+inline void* operator new(size_t size, mblock &mb) {
   return mb.allocate(size, 16);
 }
 
-void* operator new[](size_t size, mblock &mb) {
+inline void* operator new[](size_t size, mblock &mb) {
   return mb.allocate(size, 16);
 }
 

@@ -24,6 +24,7 @@ using namespace std;
 struct BindingEnv;
 struct EvalString;
 struct State;
+struct mblock;
 
 /// Parses .ninja files.
 struct ManifestParser {
@@ -32,7 +33,7 @@ struct ManifestParser {
     virtual bool ReadFile(const string& path, string* content, string* err) = 0;
   };
 
-  ManifestParser(State* state, FileReader* file_reader,
+  ManifestParser(mblock *mb, State* state, FileReader* file_reader,
                  bool dupe_edge_should_err = false);
 
   /// Load and parse a file.
@@ -62,6 +63,7 @@ private:
   /// saying "expectd foo, got bar".
   bool ExpectToken(Lexer::Token expected, string* err);
 
+  mblock* mb_;
   State* state_;
   BindingEnv* env_;
   FileReader* file_reader_;

@@ -1131,7 +1131,7 @@ int real_main(int argc, char** argv) {
     NinjaMain ninja(ninja_command, config);
 
     RealFileReader file_reader;
-    ManifestParser parser(ninja.state_, &file_reader,
+    ManifestParser parser(ninja.mb_, ninja.state_, &file_reader,
                           options.dupe_edges_should_err);
     string err;
     if (!parser.Load(options.input_file, &err)) {
