@@ -1,6 +1,7 @@
 #ifndef NINJA_MBLOCK_H_
 #define NINJA_MBLOCK_H_
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -91,6 +92,12 @@ typedef std::basic_string<char, std::char_traits<char>, mblock_allocator<char> >
 template <typename T>
 struct mblock_vector {
   typedef std::vector<T, mblock_allocator<T> > type;
+};
+template <typename Key, typename T>
+struct mblock_map {
+  typedef std::map<Key, T, std::less<Key>,
+                   mblock_allocator<std::pair<const Key, T> > >
+      type;
 };
 
 #endif
