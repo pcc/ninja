@@ -127,7 +127,7 @@ struct State {
   mblock_vector<Edge*>::type edges_;
 
   BindingEnv bindings_;
-  vector<Node*> defaults_;
+  mblock_vector<Node*>::type defaults_;
 
   mblock* mb_;
 };

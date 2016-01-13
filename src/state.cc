@@ -72,7 +72,7 @@ State::State(mblock* mb)
     : default_pool_(mb, "", 0), console_pool_(mb, "console", 1),
       phony_rule_("phony"), paths_(100, __gnu_cxx::hash<StringPiece>(),
                                    std::equal_to<StringPiece>(), mb),
-      pools_(std::less<string>(), mb), edges_(mb), mb_(mb) {
+      pools_(std::less<string>(), mb), edges_(mb), defaults_(mb), mb_(mb) {
   bindings_.AddRule(&phony_rule_);
   AddPool(&default_pool_);
   AddPool(&console_pool_);
@@ -177,7 +177,9 @@ vector<Node*> State::RootNodes(string* err) {
 }
 
 vector<Node*> State::DefaultNodes(string* err) {
-  return defaults_.empty() ? RootNodes(err) : defaults_;
+  if (!defaults_.empty())
+    return vector<Node*>(defaults_.begin(), defaults_.end());
+  return RootNodes(err);
 }
 
 void State::Reset() {
