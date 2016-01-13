@@ -146,7 +146,7 @@ bool ManifestParser::ParsePool(string* err) {
   if (depth < 0)
     return lexer_.Error("expected 'depth =' line", err);
 
-  state_->AddPool(new (*mb_) Pool(name, depth));
+  state_->AddPool(new (*mb_) Pool(mb_, name, depth));
   return true;
 }
 

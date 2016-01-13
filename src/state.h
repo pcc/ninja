@@ -37,13 +37,14 @@ struct Rule;
 /// the total scheduled weight diminishes enough (i.e. when a scheduled edge
 /// completes).
 struct Pool {
-  Pool(const string& name, int depth)
-    : name_(name), current_use_(0), depth_(depth), delayed_(&WeightedEdgeCmp) {}
+  Pool(mblock* mb, const string& name, int depth)
+      : name_(name.c_str(), mb), current_use_(0), depth_(depth),
+        delayed_(&WeightedEdgeCmp) {}
 
   // A depth of 0 is infinite
   bool is_valid() const { return depth_ >= 0; }
   int depth() const { return depth_; }
-  const string& name() const { return name_; }
+  const mblock_string& name() const { return name_; }
   int current_use() const { return current_use_; }
 
   /// true if the Pool might delay this edge
@@ -67,7 +68,7 @@ struct Pool {
   void Dump() const;
 
  private:
-  string name_;
+  mblock_string name_;
 
   /// |current_use_| is the total of the weights of the edges which are
   /// currently scheduled in the Plan (i.e. the edges in Plan::ready_).
@@ -82,8 +83,8 @@ struct Pool {
 
 /// Global state (file status) for a single run.
 struct State {
-  static Pool kDefaultPool;
-  static Pool kConsolePool;
+  Pool default_pool_;
+  Pool console_pool_;
   static const Rule kPhonyRule;
 
   State(mblock* mb);

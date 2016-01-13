@@ -69,19 +69,18 @@ bool Pool::WeightedEdgeCmp(const Edge* a, const Edge* b) {
   return ((weight_diff < 0) || (weight_diff == 0 && a < b));
 }
 
-Pool State::kDefaultPool("", 0);
-Pool State::kConsolePool("console", 1);
 const Rule State::kPhonyRule("phony");
 
-State::State(mblock* mb) : mb_(mb) {
+State::State(mblock* mb)
+    : default_pool_(mb, "", 0), console_pool_(mb, "console", 1), mb_(mb) {
   bindings_.AddRule(&kPhonyRule);
-  AddPool(&kDefaultPool);
-  AddPool(&kConsolePool);
+  AddPool(&default_pool_);
+  AddPool(&console_pool_);
 }
 
 void State::AddPool(Pool* pool) {
-  assert(LookupPool(pool->name()) == NULL);
-  pools_[pool->name()] = pool;
+  assert(LookupPool(pool->name().c_str()) == NULL);
+  pools_[pool->name().c_str()] = pool;
 }
 
 Pool* State::LookupPool(const string& pool_name) {
@@ -94,7 +93,7 @@ Pool* State::LookupPool(const string& pool_name) {
 Edge* State::AddEdge(const Rule* rule) {
   Edge* edge = new (*mb_) Edge();
   edge->rule_ = rule;
-  edge->pool_ = &State::kDefaultPool;
+  edge->pool_ = &default_pool_;
   edge->env_ = &bindings_;
   edges_.push_back(edge);
   return edge;
