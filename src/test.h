@@ -16,8 +16,11 @@
 #define NINJA_TEST_H_
 
 #include "disk_interface.h"
+#include "mblock.h"
 #include "state.h"
 #include "util.h"
+
+extern mblock test_mb;
 
 // A tiny testing framework inspired by googletest, but much simpler and
 // faster to compile. It supports most things commonly used from googltest. The

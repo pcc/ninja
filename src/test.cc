@@ -95,7 +95,7 @@ Node* StateTestWithBuiltinRules::GetNode(const string& path) {
 }
 
 void AssertParse(State* state, const char* input) {
-  ManifestParser parser(state, NULL);
+  ManifestParser parser(&test_mb, state, NULL);
   string err;
   EXPECT_TRUE(parser.ParseTest(input, &err));
   ASSERT_EQ("", err);
@@ -226,3 +226,6 @@ void ScopedTempDir::Cleanup() {
 
   temp_dir_name_.clear();
 }
+
+static char test_mb_data[1048576];
+mblock test_mb(test_mb_data, test_mb_data + 1048576);
