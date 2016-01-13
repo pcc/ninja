@@ -124,7 +124,7 @@ struct State {
   mblock_map<string, Pool*>::type pools_;
 
   /// All the edges of the graph.
-  vector<Edge*> edges_;
+  mblock_vector<Edge*>::type edges_;
 
   BindingEnv bindings_;
   vector<Node*> defaults_;

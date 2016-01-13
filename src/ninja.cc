@@ -437,7 +437,7 @@ int ToolTargetsList(const vector<Node*>& nodes, int depth, int indent) {
 }
 
 int ToolTargetsSourceList(State* state) {
-  for (vector<Edge*>::iterator e = state->edges_.begin();
+  for (mblock_vector<Edge*>::type::iterator e = state->edges_.begin();
        e != state->edges_.end(); ++e) {
     for (vector<Node*>::iterator inps = (*e)->inputs_.begin();
          inps != (*e)->inputs_.end(); ++inps) {
@@ -452,7 +452,7 @@ int ToolTargetsList(State* state, const string& rule_name) {
   set<string> rules;
 
   // Gather the outputs.
-  for (vector<Edge*>::iterator e = state->edges_.begin();
+  for (mblock_vector<Edge*>::type::iterator e = state->edges_.begin();
        e != state->edges_.end(); ++e) {
     if ((*e)->rule_->name() == rule_name) {
       for (vector<Node*>::iterator out_node = (*e)->outputs_.begin();
@@ -472,7 +472,7 @@ int ToolTargetsList(State* state, const string& rule_name) {
 }
 
 int ToolTargetsList(State* state) {
-  for (vector<Edge*>::iterator e = state->edges_.begin();
+  for (mblock_vector<Edge*>::type::iterator e = state->edges_.begin();
        e != state->edges_.end(); ++e) {
     for (vector<Node*>::iterator out_node = (*e)->outputs_.begin();
          out_node != (*e)->outputs_.end(); ++out_node) {
@@ -665,7 +665,7 @@ int NinjaMain::ToolCompilationDatabase(int argc, char* argv[]) {
   }
 
   putchar('[');
-  for (vector<Edge*>::iterator e = state_->edges_.begin();
+  for (mblock_vector<Edge*>::type::iterator e = state_->edges_.begin();
        e != state_->edges_.end(); ++e) {
     if ((*e)->inputs_.empty())
       continue;

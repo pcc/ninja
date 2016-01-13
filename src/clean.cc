@@ -112,7 +112,7 @@ void Cleaner::PrintFooter() {
 int Cleaner::CleanAll(bool generator) {
   Reset();
   PrintHeader();
-  for (vector<Edge*>::iterator e = state_->edges_.begin();
+  for (mblock_vector<Edge*>::type::iterator e = state_->edges_.begin();
        e != state_->edges_.end(); ++e) {
     // Do not try to remove phony targets
     if ((*e)->is_phony())
@@ -198,7 +198,7 @@ int Cleaner::CleanTargets(int target_count, char* targets[]) {
 void Cleaner::DoCleanRule(const Rule* rule) {
   assert(rule);
 
-  for (vector<Edge*>::iterator e = state_->edges_.begin();
+  for (mblock_vector<Edge*>::type::iterator e = state_->edges_.begin();
        e != state_->edges_.end(); ++e) {
     if ((*e)->rule().name() == rule->name()) {
       for (vector<Node*>::iterator out_node = (*e)->outputs_.begin();

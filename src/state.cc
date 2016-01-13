@@ -72,7 +72,7 @@ State::State(mblock* mb)
     : default_pool_(mb, "", 0), console_pool_(mb, "console", 1),
       phony_rule_("phony"), paths_(100, __gnu_cxx::hash<StringPiece>(),
                                    std::equal_to<StringPiece>(), mb),
-      pools_(std::less<string>(), mb), mb_(mb) {
+      pools_(std::less<string>(), mb), edges_(mb), mb_(mb) {
   bindings_.AddRule(&phony_rule_);
   AddPool(&default_pool_);
   AddPool(&console_pool_);
@@ -161,7 +161,8 @@ bool State::AddDefault(StringPiece path, string* err) {
 vector<Node*> State::RootNodes(string* err) {
   vector<Node*> root_nodes;
   // Search for nodes with no output.
-  for (vector<Edge*>::iterator e = edges_.begin(); e != edges_.end(); ++e) {
+  for (mblock_vector<Edge*>::type::iterator e = edges_.begin();
+       e != edges_.end(); ++e) {
     for (vector<Node*>::iterator out = (*e)->outputs_.begin();
          out != (*e)->outputs_.end(); ++out) {
       if ((*out)->out_edges().empty())
@@ -182,7 +183,8 @@ vector<Node*> State::DefaultNodes(string* err) {
 void State::Reset() {
   for (Paths::iterator i = paths_.begin(); i != paths_.end(); ++i)
     i->second->ResetState();
-  for (vector<Edge*>::iterator e = edges_.begin(); e != edges_.end(); ++e)
+  for (mblock_vector<Edge*>::type::iterator e = edges_.begin();
+       e != edges_.end(); ++e)
     (*e)->outputs_ready_ = false;
 }
 

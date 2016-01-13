@@ -107,7 +107,7 @@ void AssertHash(const char* expected, uint64_t actual) {
 }
 
 void VerifyGraph(const State& state) {
-  for (vector<Edge*>::const_iterator e = state.edges_.begin();
+  for (mblock_vector<Edge*>::type::const_iterator e = state.edges_.begin();
        e != state.edges_.end(); ++e) {
     // All edges need at least one output.
     EXPECT_FALSE((*e)->outputs_.empty());
