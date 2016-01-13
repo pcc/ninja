@@ -129,9 +129,10 @@ private:
 
 /// An edge in the dependency graph; links between Nodes using Rules.
 struct Edge {
-  Edge(mblock* mb) : rule_(NULL), pool_(NULL), inputs_(mb), env_(NULL),
-           outputs_ready_(false), deps_missing_(false),
-           implicit_deps_(0), order_only_deps_(0) {}
+  Edge(mblock* mb)
+      : rule_(NULL), pool_(NULL), inputs_(mb), outputs_(mb), env_(NULL),
+        outputs_ready_(false), deps_missing_(false), implicit_deps_(0),
+        order_only_deps_(0) {}
 
   /// Return true if all inputs' in-edges are ready.
   bool AllInputsReady() const;
@@ -155,7 +156,7 @@ struct Edge {
   const Rule* rule_;
   Pool* pool_;
   mblock_vector<Node*>::type inputs_;
-  vector<Node*> outputs_;
+  mblock_vector<Node*>::type outputs_;
   BindingEnv* env_;
   bool outputs_ready_;
   bool deps_missing_;

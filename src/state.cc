@@ -163,7 +163,7 @@ vector<Node*> State::RootNodes(string* err) {
   // Search for nodes with no output.
   for (mblock_vector<Edge*>::type::iterator e = edges_.begin();
        e != edges_.end(); ++e) {
-    for (vector<Node*>::iterator out = (*e)->outputs_.begin();
+    for (mblock_vector<Node*>::type::iterator out = (*e)->outputs_.begin();
          out != (*e)->outputs_.end(); ++out) {
       if ((*out)->out_edges().empty())
         root_nodes.push_back(*out);

@@ -390,7 +390,7 @@ void Plan::EdgeFinished(Edge* edge) {
   edge->pool()->RetrieveReadyEdges(&ready_);
 
   // Check off any nodes we were waiting for with this edge.
-  for (vector<Node*>::iterator o = edge->outputs_.begin();
+  for (mblock_vector<Node*>::type::iterator o = edge->outputs_.begin();
        o != edge->outputs_.end(); ++o) {
     NodeFinished(*o);
   }
@@ -453,7 +453,7 @@ bool Plan::CleanNode(DependencyScan* scan, Node* node, string* err) {
         return false;
       }
       if (!outputs_dirty) {
-        for (vector<Node*>::iterator o = (*oe)->outputs_.begin();
+        for (mblock_vector<Node*>::type::iterator o = (*oe)->outputs_.begin();
              o != (*oe)->outputs_.end(); ++o) {
           if (!CleanNode(scan, *o, err))
             return false;
@@ -562,7 +562,7 @@ void Builder::Cleanup() {
     for (vector<Edge*>::iterator e = active_edges.begin();
          e != active_edges.end(); ++e) {
       string depfile = (*e)->GetUnescapedDepfile();
-      for (vector<Node*>::iterator o = (*e)->outputs_.begin();
+      for (mblock_vector<Node*>::type::iterator o = (*e)->outputs_.begin();
            o != (*e)->outputs_.end(); ++o) {
         // Only delete this output if it was actually modified.  This is
         // important for things like the generator where we don't want to
@@ -709,7 +709,7 @@ bool Builder::StartEdge(Edge* edge, string* err) {
 
   // Create directories necessary for outputs.
   // XXX: this will block; do we care?
-  for (vector<Node*>::iterator o = edge->outputs_.begin();
+  for (mblock_vector<Node*>::type::iterator o = edge->outputs_.begin();
        o != edge->outputs_.end(); ++o) {
     if (!disk_interface_->MakeDirs((*o)->path().c_str()))
       return false;
@@ -771,7 +771,7 @@ bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
   if (edge->GetBindingBool("restat") && !config_.dry_run) {
     bool node_cleaned = false;
 
-    for (vector<Node*>::iterator o = edge->outputs_.begin();
+    for (mblock_vector<Node*>::type::iterator o = edge->outputs_.begin();
          o != edge->outputs_.end(); ++o) {
       TimeStamp new_mtime = disk_interface_->Stat((*o)->path().c_str(), err);
       if (new_mtime == -1)

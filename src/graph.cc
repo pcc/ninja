@@ -45,7 +45,7 @@ bool DependencyScan::RecomputeDirty(Edge* edge, string* err) {
   // all outputs of |edge| visited as a first step.  This ensures that edges
   // with multiple inputs and outputs are visited only once, even in cyclic
   // graphs.
-  for (vector<Node*>::iterator o = edge->outputs_.begin();
+  for (mblock_vector<Node*>::type::iterator o = edge->outputs_.begin();
        o != edge->outputs_.end(); ++o) {
     if (!(*o)->StatIfNecessary(disk_interface_, err))
       return false;
@@ -104,7 +104,7 @@ bool DependencyScan::RecomputeDirty(Edge* edge, string* err) {
       return false;
 
   // Finally, visit each output and update their dirty state if necessary.
-  for (vector<Node*>::iterator o = edge->outputs_.begin();
+  for (mblock_vector<Node*>::type::iterator o = edge->outputs_.begin();
        o != edge->outputs_.end(); ++o) {
     if (dirty)
       (*o)->MarkDirty();
@@ -124,7 +124,7 @@ bool DependencyScan::RecomputeDirty(Edge* edge, string* err) {
 bool DependencyScan::RecomputeOutputsDirty(Edge* edge, Node* most_recent_input,
                                            bool* outputs_dirty, string* err) {
   string command = edge->EvaluateCommand(/*incl_rsp_file=*/true);
-  for (vector<Node*>::iterator o = edge->outputs_.begin();
+  for (mblock_vector<Node*>::type::iterator o = edge->outputs_.begin();
        o != edge->outputs_.end(); ++o) {
     if (!(*o)->StatIfNecessary(disk_interface_, err))
       return false;
@@ -320,7 +320,7 @@ void Edge::Dump(const char* prefix) const {
     printf("%s ", (*i)->path().c_str());
   }
   printf("--%s-> ", rule_->name().c_str());
-  for (vector<Node*>::const_iterator i = outputs_.begin();
+  for (mblock_vector<Node*>::type::const_iterator i = outputs_.begin();
        i != outputs_.end() && *i != NULL; ++i) {
     printf("%s ", (*i)->path().c_str());
   }

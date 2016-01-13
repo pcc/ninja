@@ -120,7 +120,7 @@ int Cleaner::CleanAll(bool generator) {
     // Do not remove generator's files unless generator specified.
     if (!generator && (*e)->GetBindingBool("generator"))
       continue;
-    for (vector<Node*>::iterator out_node = (*e)->outputs_.begin();
+    for (mblock_vector<Node*>::type::iterator out_node = (*e)->outputs_.begin();
          out_node != (*e)->outputs_.end(); ++out_node) {
       Remove((*out_node)->path().c_str());
     }
@@ -201,7 +201,8 @@ void Cleaner::DoCleanRule(const Rule* rule) {
   for (mblock_vector<Edge*>::type::iterator e = state_->edges_.begin();
        e != state_->edges_.end(); ++e) {
     if ((*e)->rule().name() == rule->name()) {
-      for (vector<Node*>::iterator out_node = (*e)->outputs_.begin();
+      for (mblock_vector<Node*>::type::iterator out_node =
+               (*e)->outputs_.begin();
            out_node != (*e)->outputs_.end(); ++out_node) {
         Remove((*out_node)->path().c_str());
         RemoveEdgeFiles(*e);

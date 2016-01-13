@@ -48,7 +48,7 @@ void GraphViz::AddTarget(Node* node) {
   } else {
     printf("\"%p\" [label=\"%s\", shape=ellipse]\n",
            edge, edge->rule_->name().c_str());
-    for (vector<Node*>::iterator out = edge->outputs_.begin();
+    for (mblock_vector<Node*>::type::iterator out = edge->outputs_.begin();
          out != edge->outputs_.end(); ++out) {
       printf("\"%p\" -> \"%p\"\n", edge, *out);
     }

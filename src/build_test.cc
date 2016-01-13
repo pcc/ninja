@@ -567,7 +567,7 @@ bool FakeCommandRunner::StartCommand(Edge* edge) {
       edge->rule().name() == "cc" ||
       edge->rule().name() == "touch" ||
       edge->rule().name() == "touch-interrupt") {
-    for (vector<Node*>::iterator out = edge->outputs_.begin();
+    for (mblock_vector<Node*>::type::iterator out = edge->outputs_.begin();
          out != edge->outputs_.end(); ++out) {
       fs_->Create((*out)->path().c_str(), "");
     }

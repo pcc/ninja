@@ -120,7 +120,8 @@ void VerifyGraph(const State& state) {
                 out_edges.end());
     }
     // Check that the edge's outputs have the edge as in-edge.
-    for (vector<Node*>::const_iterator out_node = (*e)->outputs_.begin();
+    for (mblock_vector<Node*>::type::const_iterator out_node =
+             (*e)->outputs_.begin();
          out_node != (*e)->outputs_.end(); ++out_node) {
       EXPECT_EQ((*out_node)->in_edge(), *e);
     }

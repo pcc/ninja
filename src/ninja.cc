@@ -387,7 +387,7 @@ int NinjaMain::ToolQuery(int argc, char* argv[]) {
     for (mblock_vector<Edge*>::type::const_iterator edge =
              node->out_edges().begin();
          edge != node->out_edges().end(); ++edge) {
-      for (vector<Node*>::iterator out = (*edge)->outputs_.begin();
+      for (mblock_vector<Node*>::type::iterator out = (*edge)->outputs_.begin();
            out != (*edge)->outputs_.end(); ++out) {
         printf("    %s\n", (*out)->path().c_str());
       }
@@ -456,7 +456,8 @@ int ToolTargetsList(State* state, const string& rule_name) {
   for (mblock_vector<Edge*>::type::iterator e = state->edges_.begin();
        e != state->edges_.end(); ++e) {
     if ((*e)->rule_->name() == rule_name) {
-      for (vector<Node*>::iterator out_node = (*e)->outputs_.begin();
+      for (mblock_vector<Node*>::type::iterator out_node =
+               (*e)->outputs_.begin();
            out_node != (*e)->outputs_.end(); ++out_node) {
         rules.insert((*out_node)->path().c_str());
       }
@@ -475,7 +476,7 @@ int ToolTargetsList(State* state, const string& rule_name) {
 int ToolTargetsList(State* state) {
   for (mblock_vector<Edge*>::type::iterator e = state->edges_.begin();
        e != state->edges_.end(); ++e) {
-    for (vector<Node*>::iterator out_node = (*e)->outputs_.begin();
+    for (mblock_vector<Node*>::type::iterator out_node = (*e)->outputs_.begin();
          out_node != (*e)->outputs_.end(); ++out_node) {
       printf("%s: %s\n",
              (*out_node)->path().c_str(),
