@@ -25,10 +25,16 @@
 #elif defined(_AIX)
 #include "getopt.h"
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
 #else
 #include <getopt.h>
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -73,6 +79,9 @@ struct Options {
 
   /// Whether duplicate rules for one target should warn or print an error.
   bool dupe_edges_should_err;
+
+  const char* load;
+  const char* save;
 };
 
 /// The Ninja main() loads up a series of data structures; various tools need
@@ -80,7 +89,6 @@ struct Options {
 struct NinjaMain : public BuildLogUser {
   NinjaMain(const char* ninja_command, const BuildConfig& config) :
       ninja_command_(ninja_command), config_(config) {
-    InitMemory();
   }
 
   /// Command line used to run Ninja.
@@ -171,10 +179,12 @@ struct NinjaMain : public BuildLogUser {
     return mtime == 0;
   }
 
-  void InitMemory();
+  void NewState();
+  void LoadState(const char *path);
+  void SaveState(const char *path);
 };
 
-void NinjaMain::InitMemory() {
+void NinjaMain::NewState() {
   void* mem = mmap(reinterpret_cast<void*>(1 * 1024 * 1024 * 1024),
                    1 * 1024 * 1024 * 1024, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
@@ -182,6 +192,29 @@ void NinjaMain::InitMemory() {
                          static_cast<char*>(mem) + 1024 * 1024 * 1024);
   cur_mb = mb_;
   state_ = new (*mb_) State(mb_);
+}
+
+void NinjaMain::LoadState(const char *path) {
+  int fd = open(path, O_RDONLY);
+  off_t size = lseek(fd, 0, SEEK_END);
+  mmap(reinterpret_cast<void*>(1 * 1024 * 1024 * 1024), size,
+       PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, fd, 0);
+  mb_ = reinterpret_cast<mblock*>(1 * 1024 * 1024 * 1024);
+  cur_mb = mb_;
+  state_ = reinterpret_cast<State*>(1 * 1024 * 1024 * 1024 + sizeof(mblock));
+
+  mmap(reinterpret_cast<void*>(1 * 1024 * 1024 * 1024 + size),
+       1 * 1024 * 1024 * 1024 - size, PROT_READ | PROT_WRITE,
+       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+}
+
+void NinjaMain::SaveState(const char* path) {
+  FILE* dump = fopen(path, "w");
+  size_t size =
+      reinterpret_cast<uintptr_t>(mb_->begin) - 1024 * 1024 * 1024;
+  size = (size + 4095) & -4096;
+  fwrite(reinterpret_cast<void*>(1024 * 1024 * 1024), size, 1, dump);
+  fclose(dump);
 }
 
 /// Subtools, accessible via "-t foo".
@@ -1027,7 +1060,7 @@ int ReadFlags(int* argc, char*** argv,
 
   int opt;
   while (!options->tool &&
-         (opt = getopt_long(*argc, *argv, "d:f:j:k:l:nt:vw:C:h", kLongOptions,
+         (opt = getopt_long(*argc, *argv, "d:f:j:k:l:nt:vw:C:hX:Y:", kLongOptions,
                             NULL)) != -1) {
     switch (opt) {
       case 'd':
@@ -1067,6 +1100,12 @@ int ReadFlags(int* argc, char*** argv,
       }
       case 'n':
         config->dry_run = true;
+        break;
+      case 'X':
+        options->load = optarg;
+        break;
+      case 'Y':
+        options->save = optarg;
         break;
       case 't':
         options->tool = ChooseTool(optarg);
@@ -1134,21 +1173,25 @@ int real_main(int argc, char** argv) {
   const int kCycleLimit = 100;
   for (int cycle = 1; cycle <= kCycleLimit; ++cycle) {
     NinjaMain ninja(ninja_command, config);
-
-    RealFileReader file_reader;
-    ManifestParser parser(ninja.mb_, ninja.state_, &file_reader,
-                          options.dupe_edges_should_err);
     string err;
-    if (!parser.Load(options.input_file, &err)) {
-      Error("%s", err.c_str());
-      return 1;
-    }
 
-    FILE *dump = fopen("dump", "w");
-    fwrite(reinterpret_cast<void*>(1024 * 1024 * 1024),
-           reinterpret_cast<uintptr_t>(ninja.mb_->begin) - 1024 * 1024 * 1024,
-           1, dump);
-    fclose(dump);
+    if (options.load) {
+      ninja.LoadState(options.load);
+    } else {
+      ninja.NewState();
+
+      RealFileReader file_reader;
+      ManifestParser parser(ninja.mb_, ninja.state_, &file_reader,
+                            options.dupe_edges_should_err);
+      if (!parser.Load(options.input_file, &err)) {
+        Error("%s", err.c_str());
+        return 1;
+      }
+
+      if (options.save) {
+        ninja.SaveState(options.save);
+      }
+    }
 
     if (options.tool && options.tool->when == Tool::RUN_AFTER_LOAD)
       return (ninja.*options.tool->func)(argc, argv);
