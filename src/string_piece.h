@@ -49,6 +49,10 @@ struct StringPiece {
     return len_ ? string(str_, len_) : string();
   }
 
+  mblock_string AsMBString() const {
+    return len_ ? mblock_string(str_, len_) : mblock_string();
+  }
+
   const char* str_;
   size_t len_;
 };

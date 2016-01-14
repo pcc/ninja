@@ -31,8 +31,8 @@ void BindingEnv::AddBinding(const string& key, const string& val) {
 }
 
 void BindingEnv::AddRule(const Rule* rule) {
-  assert(LookupRuleCurrentScope(rule->name()) == NULL);
-  rules_[rule->name().c_str()] = rule;
+  assert(LookupRuleCurrentScope(rule->name().AsString()) == NULL);
+  rules_[rule->name().AsMBString()] = rule;
 }
 
 const Rule* BindingEnv::LookupRuleCurrentScope(const string& rule_name) {
@@ -54,11 +54,11 @@ const Rule* BindingEnv::LookupRule(const string& rule_name) {
 }
 
 void Rule::AddBinding(const string& key, const EvalString& val) {
-  bindings_[key] = val;
+  bindings_[key.c_str()] = val;
 }
 
 const EvalString* Rule::GetBinding(const string& key) const {
-  Bindings::const_iterator i = bindings_.find(key);
+  Bindings::const_iterator i = bindings_.find(key.c_str());
   if (i == bindings_.end())
     return NULL;
   return &i->second;

@@ -374,7 +374,7 @@ int NinjaMain::ToolQuery(int argc, char* argv[]) {
 
     printf("%s:\n", node->path().c_str());
     if (Edge* edge = node->in_edge()) {
-      printf("  input: %s\n", edge->rule_->name().c_str());
+      printf("  input: %s\n", edge->rule_->name().AsString().c_str());
       for (int in = 0; in < (int)edge->inputs_.size(); in++) {
         const char* label = "";
         if (edge->is_implicit(in))
@@ -426,7 +426,7 @@ int ToolTargetsList(Node* const* node_begin, Node* const* node_end, int depth,
       printf("  ");
     const char* target = (*n)->path().c_str();
     if ((*n)->in_edge()) {
-      printf("%s: %s\n", target, (*n)->in_edge()->rule_->name().c_str());
+      printf("%s: %s\n", target, (*n)->in_edge()->rule_->name().AsString().c_str());
       if (depth > 1 || depth <= 0)
         ToolTargetsList(vec_begin((*n)->in_edge()->inputs_),
                         vec_end((*n)->in_edge()->inputs_), depth - 1,
@@ -481,7 +481,7 @@ int ToolTargetsList(State* state) {
          out_node != (*e)->outputs_.end(); ++out_node) {
       printf("%s: %s\n",
              (*out_node)->path().c_str(),
-             (*e)->rule_->name().c_str());
+             (*e)->rule_->name().AsString().c_str());
     }
   }
   return 0;

@@ -319,7 +319,7 @@ void Edge::Dump(const char* prefix) const {
        i != inputs_.end() && *i != NULL; ++i) {
     printf("%s ", (*i)->path().c_str());
   }
-  printf("--%s-> ", rule_->name().c_str());
+  printf("--%s-> ", rule_->name().AsString().c_str());
   for (mblock_vector<Node*>::type::const_iterator i = outputs_.begin();
        i != outputs_.end() && *i != NULL; ++i) {
     printf("%s ", (*i)->path().c_str());

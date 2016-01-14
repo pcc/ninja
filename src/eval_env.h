@@ -54,9 +54,9 @@ private:
 
 /// An invokable build command and associated metadata (description, etc.).
 struct Rule {
-  explicit Rule(const string& name) : name_(name) {}
+  explicit Rule(const string& name) : name_(name.c_str()) {}
 
-  const string& name() const { return name_; }
+  StringPiece name() const { return name_; }
 
   void AddBinding(const string& key, const EvalString& val);
 
@@ -68,8 +68,8 @@ struct Rule {
   // Allow the parsers to reach into this object and fill out its fields.
   friend struct ManifestParser;
 
-  string name_;
-  typedef map<string, EvalString> Bindings;
+  mblock_string name_;
+  typedef mblock_map<mblock_string, EvalString>::type Bindings;
   Bindings bindings_;
 };
 

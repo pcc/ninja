@@ -162,7 +162,7 @@ bool ManifestParser::ParseRule(string* err) {
   if (env_->LookupRuleCurrentScope(name) != NULL)
     return lexer_.Error("duplicate rule '" + name + "'", err);
 
-  Rule* rule = new Rule(name);  // XXX scoped_ptr
+  Rule* rule = new (*cur_mb) Rule(name);  // XXX scoped_ptr
 
   while (lexer_.PeekToken(Lexer::INDENT)) {
     string key;
