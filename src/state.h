@@ -121,7 +121,7 @@ struct State {
   Paths paths_;
 
   /// All the pools used in the graph.
-  mblock_map<string, Pool*>::type pools_;
+  mblock_map<mblock_string, Pool*>::type pools_;
 
   /// All the edges of the graph.
   mblock_vector<Edge*>::type edges_;

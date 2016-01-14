@@ -72,7 +72,7 @@ State::State(mblock* mb)
     : default_pool_(mb, "", 0), console_pool_(mb, "console", 1),
       phony_rule_("phony"), paths_(100, __gnu_cxx::hash<StringPiece>(),
                                    std::equal_to<StringPiece>(), mb),
-      pools_(std::less<string>(), mb), edges_(mb), defaults_(mb), mb_(mb) {
+      edges_(mb), defaults_(mb), mb_(mb) {
   bindings_.AddRule(&phony_rule_);
   AddPool(&default_pool_);
   AddPool(&console_pool_);
@@ -84,7 +84,8 @@ void State::AddPool(Pool* pool) {
 }
 
 Pool* State::LookupPool(const string& pool_name) {
-  mblock_map<string, Pool*>::type::iterator i = pools_.find(pool_name);
+  mblock_map<mblock_string, Pool*>::type::iterator i =
+      pools_.find(pool_name.c_str());
   if (i == pools_.end())
     return NULL;
   return i->second;
@@ -201,9 +202,9 @@ void State::Dump() {
   }
   if (!pools_.empty()) {
     printf("resource_pools:\n");
-    for (mblock_map<string, Pool*>::type::const_iterator it = pools_.begin();
-         it != pools_.end(); ++it)
-    {
+    for (mblock_map<mblock_string, Pool*>::type::const_iterator it =
+             pools_.begin();
+         it != pools_.end(); ++it) {
       if (!it->second->name().empty()) {
         it->second->Dump();
       }
