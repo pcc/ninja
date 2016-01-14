@@ -23,12 +23,15 @@ using namespace std;
 #include "mblock.h"
 #include "string_piece.h"
 
+struct Edge;
+struct Node;
 struct Rule;
 
 /// An interface for a scope for variable (e.g. "$foo") lookups.
 struct Env {
-  virtual ~Env() {}
-  virtual string LookupVariable(const string& var) = 0;
+  enum Kind { kEdgeEnv, kBindingEnv } kind_;
+  Env(Kind kind) : kind_(kind) {}
+  string LookupVariable(const string& var);
 };
 
 /// A tokenized string that contains variable references.
@@ -76,11 +79,10 @@ struct Rule {
 /// An Env which contains a mapping of variables to values
 /// as well as a pointer to a parent scope.
 struct BindingEnv : public Env {
-  BindingEnv() : parent_(NULL) {}
-  explicit BindingEnv(BindingEnv* parent) : parent_(parent) {}
+  BindingEnv() : Env(kBindingEnv), parent_(NULL) {}
+  explicit BindingEnv(BindingEnv* parent) : Env(kBindingEnv), parent_(parent) {}
 
-  virtual ~BindingEnv() {}
-  virtual string LookupVariable(const string& var);
+  string LookupVariable(const string& var);
 
   void AddRule(const Rule* rule);
   const Rule* LookupRule(const string& rule_name);
@@ -102,5 +104,31 @@ private:
   mblock_map<mblock_string, const Rule*>::type rules_;
   BindingEnv* parent_;
 };
+
+/// An Env for an Edge, providing $in and $out.
+struct EdgeEnv : public Env {
+  enum EscapeKind { kShellEscape, kDoNotEscape };
+
+  EdgeEnv(Edge* edge, EscapeKind escape)
+      : Env(kEdgeEnv), edge_(edge), escape_in_out_(escape), recursive_(false) {}
+  string LookupVariable(const string& var);
+
+  /// Given a span of Nodes, construct a list of paths suitable for a command
+  /// line.
+  string MakePathList(Node** begin, Node** end, char sep);
+
+ private:
+  vector<string> lookups_;
+  Edge* edge_;
+  EscapeKind escape_in_out_;
+  bool recursive_;
+};
+
+inline string Env::LookupVariable(const string& var) {
+  if (kind_ == kBindingEnv)
+    return static_cast<BindingEnv *>(this)->LookupVariable(var);
+  else
+    return static_cast<EdgeEnv *>(this)->LookupVariable(var);
+}
 
 #endif  // NINJA_EVAL_ENV_H_

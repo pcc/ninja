@@ -22,6 +22,7 @@
 #include "depfile_parser.h"
 #include "deps_log.h"
 #include "disk_interface.h"
+#include "eval_env.h"
 #include "manifest_parser.h"
 #include "metrics.h"
 #include "state.h"
@@ -211,25 +212,6 @@ bool Edge::AllInputsReady() const {
   }
   return true;
 }
-
-/// An Env for an Edge, providing $in and $out.
-struct EdgeEnv : public Env {
-  enum EscapeKind { kShellEscape, kDoNotEscape };
-
-  EdgeEnv(Edge* edge, EscapeKind escape)
-      : edge_(edge), escape_in_out_(escape), recursive_(false) {}
-  virtual string LookupVariable(const string& var);
-
-  /// Given a span of Nodes, construct a list of paths suitable for a command
-  /// line.
-  string MakePathList(Node** begin, Node** end, char sep);
-
- private:
-  vector<string> lookups_;
-  Edge* edge_;
-  EscapeKind escape_in_out_;
-  bool recursive_;
-};
 
 string EdgeEnv::LookupVariable(const string& var) {
   if (var == "in" || var == "in_newline") {
