@@ -48,7 +48,7 @@ struct EvalString {
 
 private:
   enum TokenType { RAW, SPECIAL };
-  typedef vector<pair<string, TokenType> > TokenList;
+  typedef mblock_vector<pair<mblock_string, TokenType> >::type TokenList;
   TokenList parsed_;
 };
 

@@ -104,9 +104,9 @@ string EvalString::Evaluate(Env* env) const {
   string result;
   for (TokenList::const_iterator i = parsed_.begin(); i != parsed_.end(); ++i) {
     if (i->second == RAW)
-      result.append(i->first);
+      result.append(i->first.c_str());
     else
-      result.append(env->LookupVariable(i->first));
+      result.append(env->LookupVariable(i->first.c_str()));
   }
   return result;
 }
@@ -116,11 +116,11 @@ void EvalString::AddText(StringPiece text) {
   if (!parsed_.empty() && parsed_.back().second == RAW) {
     parsed_.back().first.append(text.str_, text.len_);
   } else {
-    parsed_.push_back(make_pair(text.AsString(), RAW));
+    parsed_.push_back(make_pair(text.AsString().c_str(), RAW));
   }
 }
 void EvalString::AddSpecial(StringPiece text) {
-  parsed_.push_back(make_pair(text.AsString(), SPECIAL));
+  parsed_.push_back(make_pair(text.AsString().c_str(), SPECIAL));
 }
 
 string EvalString::Serialize() const {
@@ -130,7 +130,7 @@ string EvalString::Serialize() const {
     result.append("[");
     if (i->second == SPECIAL)
       result.append("$");
-    result.append(i->first);
+    result.append(i->first.c_str());
     result.append("]");
   }
   return result;
