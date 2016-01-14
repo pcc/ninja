@@ -20,6 +20,7 @@
 #include <vector>
 using namespace std;
 
+#include "mblock.h"
 #include "string_piece.h"
 
 struct Rule;
@@ -84,7 +85,7 @@ struct BindingEnv : public Env {
   void AddRule(const Rule* rule);
   const Rule* LookupRule(const string& rule_name);
   const Rule* LookupRuleCurrentScope(const string& rule_name);
-  const map<string, const Rule*>& GetRules() const;
+  const mblock_map<mblock_string, const Rule*>::type& GetRules() const;
 
   void AddBinding(const string& key, const string& val);
 
@@ -97,8 +98,8 @@ struct BindingEnv : public Env {
                             Env* env);
 
 private:
-  map<string, string> bindings_;
-  map<string, const Rule*> rules_;
+  mblock_map<mblock_string, mblock_string>::type bindings_;
+  mblock_map<mblock_string, const Rule*>::type rules_;
   BindingEnv* parent_;
 };
 

@@ -38,26 +38,26 @@ inline void* operator new[](size_t size, mblock &mb) {
   return mb.allocate(size, 16);
 }
 
+extern mblock *cur_mb;
+
 template <class T>
 struct mblock_allocator {
-  mblock *mb;
-
-  mblock_allocator() : mb(0) {}
-  mblock_allocator(mblock *mb) : mb(mb) {}
+  mblock_allocator() {}
+  mblock_allocator(mblock *mb) {}
   template <class U>
-  mblock_allocator(const mblock_allocator<U> &other) : mb(other.mb) {}
+  mblock_allocator(const mblock_allocator<U> &other) {}
   T* allocate(size_t n) {
-    return static_cast<T *>(mb->allocate(n * sizeof(T), __alignof__(T)));
+    return static_cast<T *>(cur_mb->allocate(n * sizeof(T), __alignof__(T)));
   }
   void deallocate(T* p, size_t n) {}
 
   template <class U>
   bool operator==(const mblock_allocator<U> &other) const {
-    return mb == other.mb;
+    return true;
   }
   template <class U>
   bool operator!=(const mblock_allocator<U> &other) const {
-    return mb != other.mb;
+    return false;
   }
   typedef T value_type;
   typedef size_t size_type;

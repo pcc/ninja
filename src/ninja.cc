@@ -180,6 +180,7 @@ void NinjaMain::InitMemory() {
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
   mb_ = new (mem) mblock(static_cast<char*>(mem) + sizeof(mblock),
                          static_cast<char*>(mem) + 1024 * 1024 * 1024);
+  cur_mb = mb_;
   state_ = new (*mb_) State(mb_);
 }
 

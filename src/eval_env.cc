@@ -17,32 +17,35 @@
 #include "eval_env.h"
 
 string BindingEnv::LookupVariable(const string& var) {
-  map<string, string>::iterator i = bindings_.find(var);
+  mblock_map<mblock_string, mblock_string>::type::iterator i =
+      bindings_.find(var.c_str());
   if (i != bindings_.end())
-    return i->second;
+    return i->second.c_str();
   if (parent_)
     return parent_->LookupVariable(var);
   return "";
 }
 
 void BindingEnv::AddBinding(const string& key, const string& val) {
-  bindings_[key] = val;
+  bindings_[key.c_str()] = val.c_str();
 }
 
 void BindingEnv::AddRule(const Rule* rule) {
   assert(LookupRuleCurrentScope(rule->name()) == NULL);
-  rules_[rule->name()] = rule;
+  rules_[rule->name().c_str()] = rule;
 }
 
 const Rule* BindingEnv::LookupRuleCurrentScope(const string& rule_name) {
-  map<string, const Rule*>::iterator i = rules_.find(rule_name);
+  mblock_map<mblock_string, const Rule*>::type::iterator i =
+      rules_.find(rule_name.c_str());
   if (i == rules_.end())
     return NULL;
   return i->second;
 }
 
 const Rule* BindingEnv::LookupRule(const string& rule_name) {
-  map<string, const Rule*>::iterator i = rules_.find(rule_name);
+  mblock_map<mblock_string, const Rule*>::type::iterator i =
+      rules_.find(rule_name.c_str());
   if (i != rules_.end())
     return i->second;
   if (parent_)
@@ -75,16 +78,18 @@ bool Rule::IsReservedBinding(const string& var) {
       var == "msvc_deps_prefix";
 }
 
-const map<string, const Rule*>& BindingEnv::GetRules() const {
+const mblock_map<mblock_string, const Rule*>::type& BindingEnv::GetRules()
+    const {
   return rules_;
 }
 
 string BindingEnv::LookupWithFallback(const string& var,
                                       const EvalString* eval,
                                       Env* env) {
-  map<string, string>::iterator i = bindings_.find(var);
+  mblock_map<mblock_string, mblock_string>::type::iterator i =
+      bindings_.find(var.c_str());
   if (i != bindings_.end())
-    return i->second;
+    return i->second.c_str();
 
   if (eval)
     return eval->Evaluate(env);

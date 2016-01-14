@@ -302,7 +302,7 @@ bool ManifestParser::ParseEdge(string* err) {
 
   // Bindings on edges are rare, so allocate per-edge envs only when needed.
   bool has_indent_token = lexer_.PeekToken(Lexer::INDENT);
-  BindingEnv* env = has_indent_token ? new BindingEnv(env_) : env_;
+  BindingEnv* env = has_indent_token ? new (*cur_mb) BindingEnv(env_) : env_;
   while (has_indent_token) {
     string key;
     EvalString val;
@@ -382,7 +382,7 @@ bool ManifestParser::ParseFileInclude(bool new_scope, string* err) {
 
   ManifestParser subparser(mb_, state_, file_reader_);
   if (new_scope) {
-    subparser.env_ = new BindingEnv(env_);
+    subparser.env_ = new (*cur_mb) BindingEnv(env_);
   } else {
     subparser.env_ = env_;
   }

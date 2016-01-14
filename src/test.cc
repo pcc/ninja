@@ -231,3 +231,13 @@ void ScopedTempDir::Cleanup() {
 
 static char test_mb_data[104857600];
 mblock test_mb(test_mb_data, test_mb_data + sizeof(test_mb_data));
+
+namespace {
+
+struct set_cur_mb {
+  set_cur_mb() {
+    cur_mb = &test_mb;
+  }
+} set;
+
+}
