@@ -121,6 +121,7 @@ struct NinjaMain : public BuildLogUser {
   int ToolClean(const Options* options, int argc, char* argv[]);
   int ToolCompilationDatabase(const Options* options, int argc, char* argv[]);
   int ToolRecompact(const Options* options, int argc, char* argv[]);
+  int ToolFindRedundantDeps(const Options* options, int argc, char* argv[]);
   int ToolUrtle(const Options* options, int argc, char** argv);
 
   /// Open the build log.
@@ -773,6 +774,76 @@ int NinjaMain::ToolRecompact(const Options* options, int argc, char* argv[]) {
   return 0;
 }
 
+void FindIndirectDeps(Node* n, std::set<Node*>& dep_set,
+                      std::set<Node*>& oo_dep_set) {
+  Edge* e = n->in_edge();
+  if (!e)
+    return;
+  for (vector<Node*>::const_iterator oe = e->inputs_.begin();
+       oe != e->inputs_.end(); ++oe) {
+    if (e->is_order_only(oe - e->inputs_.begin())) {
+      if (!oo_dep_set.insert(*oe).second)
+        continue;
+      FindIndirectDeps(*oe, oo_dep_set, oo_dep_set);
+    } else {
+      if (!dep_set.insert(*oe).second)
+        continue;
+      FindIndirectDeps(*oe, dep_set, oo_dep_set);
+    }
+  }
+}
+
+int NinjaMain::ToolFindRedundantDeps(const Options* options, int argc,
+                                     char* argv[]) {
+  for (vector<Edge*>::iterator e = state_.edges_.begin();
+       e != state_.edges_.end(); ++e) {
+    std::set<Node*> indirect_deps, indirect_order_only_deps;
+    if ((*e)->inputs_.size() < 2)
+      continue;
+    for (vector<Node*>::const_iterator oe = (*e)->inputs_.begin();
+       oe != (*e)->inputs_.end(); ++oe) {
+      if ((*e)->is_order_only(oe - (*e)->inputs_.begin()))
+        FindIndirectDeps(*oe, indirect_order_only_deps,
+                         indirect_order_only_deps);
+      else
+        FindIndirectDeps(*oe, indirect_deps, indirect_order_only_deps);
+    }
+    std::vector<Node *> new_explicit_deps, new_implicit_deps, new_oo_deps;
+    for (vector<Node*>::const_iterator oe = (*e)->inputs_.begin();
+       oe != (*e)->inputs_.end(); ++oe) {
+      if ((*e)->is_order_only(oe - (*e)->inputs_.begin())) {
+        if (!indirect_order_only_deps.count(*oe))
+          new_oo_deps.push_back(*oe);
+      } else if ((*e)->is_implicit(oe - (*e)->inputs_.begin())) {
+        if (!indirect_deps.count(*oe))
+          new_implicit_deps.push_back(*oe);
+      } else {
+        new_explicit_deps.push_back(*oe);
+      }
+    }
+    if (new_explicit_deps.size() + new_implicit_deps.size() +
+            new_oo_deps.size() ==
+        (*e)->inputs_.size())
+      continue;
+    printf("build");
+    for (auto o : (*e)->outputs_)
+      printf(" %s", o->path().c_str());
+    printf(": %s", (*e)->rule().name().c_str());
+    for (auto o : new_explicit_deps)
+      printf(" %s", o->path().c_str());
+    if (!new_implicit_deps.empty())
+      printf(" |");
+    for (auto o : new_implicit_deps)
+      printf(" %s", o->path().c_str());
+    if (!new_oo_deps.empty())
+      printf(" ||");
+    for (auto o : new_oo_deps)
+      printf(" %s", o->path().c_str());
+    printf("\n");
+  }
+  return 0;
+}
+
 int NinjaMain::ToolUrtle(const Options* options, int argc, char** argv) {
   // RLE encoded.
   const char* urtle =
@@ -827,6 +898,8 @@ const Tool* ChooseTool(const string& tool_name) {
       Tool::RUN_AFTER_LOAD, &NinjaMain::ToolCompilationDatabase },
     { "recompact",  "recompacts ninja-internal data structures",
       Tool::RUN_AFTER_LOAD, &NinjaMain::ToolRecompact },
+    { "find-redundant-deps",  "find redundant deps",
+      Tool::RUN_AFTER_LOAD, &NinjaMain::ToolFindRedundantDeps },
     { "urtle", NULL,
       Tool::RUN_AFTER_FLAGS, &NinjaMain::ToolUrtle },
     { NULL, NULL, Tool::RUN_AFTER_FLAGS, NULL }
