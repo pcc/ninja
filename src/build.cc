@@ -110,8 +110,7 @@ void BuildStatus::BuildEdgeStarted(Edge* edge) {
 }
 
 void BuildStatus::BuildEdgeFinished(Edge* edge,
-                                    bool success,
-                                    const string& output,
+                                    CommandRunner::Result* result,
                                     int* start_time,
                                     int* end_time) {
   int64_t now = GetTimeMillis();
@@ -145,17 +144,19 @@ void BuildStatus::BuildEdgeFinished(Edge* edge,
   }
 
   // Print the command that is spewing before printing its output.
-  if (!success) {
+  if (!result->success()) {
     string outputs;
     for (vector<Node*>::const_iterator o = edge->outputs_.begin();
          o != edge->outputs_.end(); ++o)
       outputs += (*o)->path() + " ";
 
-    printer_.PrintOnNewLine("FAILED: " + outputs + "\n");
+    char buf[64];
+    snprintf(buf, 64, "FAILED (exit code 0x%x): ", result->exit_code);
+    printer_.PrintOnNewLine(buf + outputs + "\n");
     printer_.PrintOnNewLine(edge->EvaluateCommand() + "\n");
   }
 
-  if (!output.empty()) {
+  if (!result->output.empty()) {
     // ninja sets stdout and stderr of subprocesses to a pipe, to be able to
     // check if the output is empty. Some compilers, e.g. clang, check
     // isatty(stderr) to decide if they should print colored output.
@@ -170,9 +171,9 @@ void BuildStatus::BuildEdgeFinished(Edge* edge,
     // TODO: There should be a flag to disable escape code stripping.
     string final_output;
     if (!printer_.is_smart_terminal())
-      final_output = StripAnsiEscapeCodes(output);
+      final_output = StripAnsiEscapeCodes(result->output);
     else
-      final_output = output;
+      final_output = result->output;
 
 #ifdef _WIN32
     // Fix extra CR being added on Windows, writing out CR CR LF (#773)
@@ -556,7 +557,9 @@ bool RealCommandRunner::WaitForCommand(Result* result) {
       return false;
   }
 
-  result->status = subproc->Finish();
+  std::pair<ExitStatus, uint32_t> p = subproc->Finish();
+  result->status = p.first;
+  result->exit_code = p.second;
   result->output = subproc->GetOutput();
 
   map<Subprocess*, Edge*>::iterator e = subproc_to_edge_.find(subproc);
@@ -788,8 +791,7 @@ bool Builder::FinishCommand(CommandRunner::Result* result, string* err) {
   }
 
   int start_time, end_time;
-  status_->BuildEdgeFinished(edge, result->success(), result->output,
-                             &start_time, &end_time);
+  status_->BuildEdgeFinished(edge, result, &start_time, &end_time);
 
   // The rest of this function only applies to successful commands.
   if (!result->success()) {

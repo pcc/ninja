@@ -25,6 +25,7 @@ using namespace std;
 #else
 #include <signal.h>
 #endif
+#include <stdint.h>
 
 // ppoll() exists on FreeBSD, but only on newer versions.
 #ifdef __FreeBSD__
@@ -45,7 +46,7 @@ struct Subprocess {
 
   /// Returns ExitSuccess on successful process exit, ExitInterrupted if
   /// the process was interrupted, ExitFailure if it otherwise failed.
-  ExitStatus Finish();
+  std::pair<ExitStatus, uint32_t> Finish();
 
   bool Done() const;
 

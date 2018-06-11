@@ -124,6 +124,7 @@ struct CommandRunner {
     Result() : edge(NULL) {}
     Edge* edge;
     ExitStatus status;
+    uint32_t exit_code;
     string output;
     bool success() const { return status == ExitSuccess; }
   };
@@ -215,7 +216,7 @@ struct BuildStatus {
   explicit BuildStatus(const BuildConfig& config);
   void PlanHasTotalEdges(int total);
   void BuildEdgeStarted(Edge* edge);
-  void BuildEdgeFinished(Edge* edge, bool success, const string& output,
+  void BuildEdgeFinished(Edge* edge, CommandRunner::Result* result,
                          int* start_time, int* end_time);
   void BuildStarted();
   void BuildFinished();

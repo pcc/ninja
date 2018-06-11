@@ -127,7 +127,7 @@ void Subprocess::OnPipeReady() {
   }
 }
 
-ExitStatus Subprocess::Finish() {
+std::pair<ExitStatus, uint32_t> Subprocess::Finish() {
   assert(pid_ != -1);
   int status;
   if (waitpid(pid_, &status, 0) < 0)
@@ -136,14 +136,13 @@ ExitStatus Subprocess::Finish() {
 
   if (WIFEXITED(status)) {
     int exit = WEXITSTATUS(status);
-    if (exit == 0)
-      return ExitSuccess;
+    return std::make_pair(exit == 0 ? ExitSuccess : ExitFailure, exit);
   } else if (WIFSIGNALED(status)) {
     if (WTERMSIG(status) == SIGINT || WTERMSIG(status) == SIGTERM
         || WTERMSIG(status) == SIGHUP)
-      return ExitInterrupted;
+      return std::make_pair(ExitInterrupted, 0);
   }
-  return ExitFailure;
+  return std::make_pair(ExitFailure, 0);
 }
 
 bool Subprocess::Done() const {

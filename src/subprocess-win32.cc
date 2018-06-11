@@ -171,9 +171,9 @@ void Subprocess::OnPipeReady() {
   // function again later and get them at that point.
 }
 
-ExitStatus Subprocess::Finish() {
+std::pair<ExitStatus, uint32_t> Subprocess::Finish() {
   if (!child_)
-    return ExitFailure;
+    return std::make_pair(ExitFailure, 0);
 
   // TODO: add error handling for all of these.
   WaitForSingleObject(child_, INFINITE);
@@ -184,9 +184,10 @@ ExitStatus Subprocess::Finish() {
   CloseHandle(child_);
   child_ = NULL;
 
-  return exit_code == 0              ? ExitSuccess :
-         exit_code == CONTROL_C_EXIT ? ExitInterrupted :
-                                       ExitFailure;
+  ExitStatus status = exit_code == 0              ? ExitSuccess :
+                      exit_code == CONTROL_C_EXIT ? ExitInterrupted :
+                                                    ExitFailure;
+  return std::make_pair(status, exit_code);
 }
 
 bool Subprocess::Done() const {

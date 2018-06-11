@@ -48,7 +48,7 @@ TEST_F(SubprocessTest, BadCommandStderr) {
     subprocs_.DoWork();
   }
 
-  EXPECT_EQ(ExitFailure, subproc->Finish());
+  EXPECT_EQ(ExitFailure, subproc->Finish().first);
   EXPECT_NE("", subproc->GetOutput());
 }
 
@@ -62,7 +62,7 @@ TEST_F(SubprocessTest, NoSuchCommand) {
     subprocs_.DoWork();
   }
 
-  EXPECT_EQ(ExitFailure, subproc->Finish());
+  EXPECT_EQ(ExitFailure, subproc->Finish().first);
   EXPECT_NE("", subproc->GetOutput());
 #ifdef _WIN32
   ASSERT_EQ("CreateProcess failed: The system cannot find the file "
@@ -80,7 +80,7 @@ TEST_F(SubprocessTest, InterruptChild) {
     subprocs_.DoWork();
   }
 
-  EXPECT_EQ(ExitInterrupted, subproc->Finish());
+  EXPECT_EQ(ExitInterrupted, subproc->Finish().first);
 }
 
 TEST_F(SubprocessTest, InterruptParent) {
@@ -104,7 +104,7 @@ TEST_F(SubprocessTest, InterruptChildWithSigTerm) {
     subprocs_.DoWork();
   }
 
-  EXPECT_EQ(ExitInterrupted, subproc->Finish());
+  EXPECT_EQ(ExitInterrupted, subproc->Finish().first);
 }
 
 TEST_F(SubprocessTest, InterruptParentWithSigTerm) {
@@ -128,7 +128,7 @@ TEST_F(SubprocessTest, InterruptChildWithSigHup) {
     subprocs_.DoWork();
   }
 
-  EXPECT_EQ(ExitInterrupted, subproc->Finish());
+  EXPECT_EQ(ExitInterrupted, subproc->Finish().first);
 }
 
 TEST_F(SubprocessTest, InterruptParentWithSigHup) {
@@ -155,7 +155,7 @@ TEST_F(SubprocessTest, Console) {
       subprocs_.DoWork();
     }
 
-    EXPECT_EQ(ExitSuccess, subproc->Finish());
+    EXPECT_EQ(ExitSuccess, subproc->Finish().first);
   }
 }
 
@@ -168,7 +168,7 @@ TEST_F(SubprocessTest, SetWithSingle) {
   while (!subproc->Done()) {
     subprocs_.DoWork();
   }
-  ASSERT_EQ(ExitSuccess, subproc->Finish());
+  ASSERT_EQ(ExitSuccess, subproc->Finish().first);
   ASSERT_NE("", subproc->GetOutput());
 
   ASSERT_EQ(1u, subprocs_.finished_.size());
@@ -208,7 +208,7 @@ TEST_F(SubprocessTest, SetWithMulti) {
   ASSERT_EQ(3u, subprocs_.finished_.size());
 
   for (int i = 0; i < 3; ++i) {
-    ASSERT_EQ(ExitSuccess, processes[i]->Finish());
+    ASSERT_EQ(ExitSuccess, processes[i]->Finish().first);
     ASSERT_NE("", processes[i]->GetOutput());
     delete processes[i];
   }
@@ -238,7 +238,7 @@ TEST_F(SubprocessTest, SetWithLots) {
   while (!subprocs_.running_.empty())
     subprocs_.DoWork();
   for (size_t i = 0; i < procs.size(); ++i) {
-    ASSERT_EQ(ExitSuccess, procs[i]->Finish());
+    ASSERT_EQ(ExitSuccess, procs[i]->Finish().first);
     ASSERT_NE("", procs[i]->GetOutput());
   }
   ASSERT_EQ(kNumProcs, subprocs_.finished_.size());
@@ -255,7 +255,7 @@ TEST_F(SubprocessTest, ReadStdin) {
   while (!subproc->Done()) {
     subprocs_.DoWork();
   }
-  ASSERT_EQ(ExitSuccess, subproc->Finish());
+  ASSERT_EQ(ExitSuccess, subproc->Finish().first);
   ASSERT_EQ(1u, subprocs_.finished_.size());
 }
 #endif  // _WIN32
