@@ -1,3 +1,17 @@
+// Copyright 2024 Google LLC. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #include <algorithm>
 #include <arm_neon.h>
 #include <atomic>
@@ -7,15 +21,18 @@
 #include <linux/prctl.h>
 #include <list>
 #include <poll.h>
+#include <regex>
 #include <set>
 #include <span>
 #include <spawn.h>
+#include <stdarg.h>
 #include <string>
 #include <string_view>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
-#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -24,8 +41,6 @@
 #include <sys/stat.h>
 
 #include "oneapi/tbb/concurrent_hash_map.h"
-#include "oneapi/tbb/concurrent_vector.h"
-#include "oneapi/tbb/parallel_for_each.h"
 #include "oneapi/tbb/task_group.h"
 #include <phmap.h>
 
@@ -36,6 +51,9 @@ using namespace oneapi;
 
 struct HashResult {
   uint64_t lo, hi;
+  bool operator==(const HashResult &other) const {
+    return lo == other.lo && hi == other.hi;
+  }
 };
 
 struct Rule {
@@ -62,14 +80,21 @@ struct Scope;
 struct Edge {
   Scope *scope;
   std::vector<Node *> outputs, inputs;
+  std::span<Node *> explicit_outputs() {
+    return std::span<Node *>(outputs).subspan(0, first_implicit_output);
+  }
   std::span<Node *> explicit_inputs() {
-    return std::span<Node *>(inputs).subspan(0, first_implicit);
+    return std::span<Node *>(inputs).subspan(0, first_implicit_input);
+  }
+  std::span<Node *> non_order_only_inputs() {
+    return std::span<Node *>(inputs).subspan(0, first_order_only_input);
   }
   Rule rule;
-  size_t first_implicit = -1ul, first_order_only = -1ul;
+  size_t first_implicit_output = -1ul;
+  size_t first_implicit_input = -1ul;
+  size_t first_order_only_input = -1ul;
   char *vars;
-  HashResult hash, full_hash;
-  std::atomic<size_t> done_count = 0;
+  HashResult hash;
   bool dirty = false;
   bool needed = false;
 };
@@ -82,6 +107,8 @@ struct Node {
   bool nonexistent = false;
   std::atomic<bool> statted = false;
   struct timespec mtime;
+  uint32_t build_log_index = -1u;
+  std::optional<HashResult> build_log_hash;
 };
 
 struct Global {
@@ -164,7 +191,7 @@ void append_named_var_expansion(std::string &buf, std::string_view name,
       return;
     }
     if (name == "out") {
-      expand_node_list(es.build_edge->outputs, ' ');
+      expand_node_list(es.build_edge->explicit_outputs(), ' ');
       return;
     }
 
@@ -598,10 +625,12 @@ void resolve_build(Global &global, Scope &scope, std::span<Rule> builds) {
     e->scope = &scope;
     e->hash = build.hash;
     auto get_or_create_node = [&](Var v) {
-      if (v.simple)
+      if (v.simple) {
         tmp_node->path = v.value;
-      else
+      } else {
         append_expansion(tmp_node->path_buf, v.value, &scope);
+        tmp_node->path = tmp_node->path_buf;
+      }
       tmp_node->path = canonicalize(tmp_node->path, tmp_node->path_buf);
       Node *n;
       if (global.nodes.try_emplace_l(
@@ -617,10 +646,16 @@ void resolve_build(Global &global, Scope &scope, std::span<Rule> builds) {
       Var out = var_token<ColonIsToken | SpaceIsSeparator>(pos);
       if (out.value == ":")
         break;
+      if (out.value == "|") {
+        e->first_implicit_output = e->outputs.size();
+        continue;
+      }
       Node *out_node = get_or_create_node(out);
       out_node->in_edge = e;
       e->outputs.push_back(out_node);
     }
+    if (e->first_implicit_output == -1ul)
+      e->first_implicit_output = e->outputs.size();
     bool simple;
     std::string_view rule = token<ColonIsToken | SpaceIsSeparator>(pos, simple);
     if (rule == "phony") {
@@ -641,21 +676,21 @@ void resolve_build(Global &global, Scope &scope, std::span<Rule> builds) {
     while (1) {
       Var in = var_token<ColonIsToken | SpaceIsSeparator>(pos);
       if (in.value == "|") {
-        e->first_implicit = e->inputs.size();
+        e->first_implicit_input = e->inputs.size();
         continue;
       }
       if (in.value == "||") {
-        e->first_order_only = e->inputs.size();
+        e->first_order_only_input = e->inputs.size();
         continue;
       }
       if (in.value == "")
         break;
       e->inputs.push_back(get_or_create_node(in));
     }
-    if (e->first_order_only == -1ul)
-      e->first_order_only = e->inputs.size();
-    if (e->first_implicit == -1ul)
-      e->first_implicit = e->first_order_only;
+    if (e->first_order_only_input == -1ul)
+      e->first_order_only_input = e->inputs.size();
+    if (e->first_implicit_input == -1ul)
+      e->first_implicit_input = e->first_order_only_input;
     e->vars = pos;
   }
   delete tmp_node;
@@ -667,11 +702,23 @@ timespec now() {
   return ts;
 }
 
+timespec prog_begin = now();
+
 void print_difference(timespec a, timespec b) {
   uint64_t a64 = a.tv_sec * 1000000000 + a.tv_nsec;
   uint64_t b64 = b.tv_sec * 1000000000 + b.tv_nsec;
-  printf("[%lu.%06lu] ", (a64 - b64) / 1000000000,
-         ((a64 - b64) % 1000000000) / 1000);
+  fprintf(stderr, "[%lu.%06lu] ", (a64 - b64) / 1000000000,
+          ((a64 - b64) % 1000000000) / 1000);
+}
+
+void dbg(const char *format, ...) {
+  static bool debug_enabled = getenv("POM_DEBUG");
+  if (!debug_enabled)
+    return;
+  print_difference(now(), prog_begin);
+  va_list ap;
+  va_start(ap, format);
+  vfprintf(stderr, format, ap);
 }
 
 void parse_scope(tbb::task_group &tg, Global &global, Scope *parent,
@@ -700,8 +747,6 @@ void parse_scope(tbb::task_group &tg, Global &global, Scope *parent,
   }
 }
 
-timespec prog_begin = now();
-
 struct Subprocess {
   Edge *edge;
   int fd;
@@ -711,9 +756,82 @@ struct Subprocess {
 
 struct BuildState {
   size_t parallelism = 12;
+  int log_fd;
+  uint32_t build_log_next_index = 0;
   std::list<Subprocess> subprocesses;
   std::deque<Edge *> pending_edges;
+  size_t completed_edges = 0;
+  size_t total_edges = 0;
+  bool total_edges_known = false;
+  std::string last_description;
 };
+
+std::string ElideMiddle(const std::string &str, size_t width) {
+  switch (width) {
+  case 0:
+    return "";
+  case 1:
+    return ".";
+  case 2:
+    return "..";
+  case 3:
+    return "...";
+  }
+  const int kMargin = 3; // Space for "...".
+  const static std::regex ansi_escape("\\x1b[^m]*m");
+  std::string result = std::regex_replace(str, ansi_escape, "");
+  if (result.size() <= width) {
+    return str;
+  }
+  int32_t elide_size = (width - kMargin) / 2;
+
+  std::vector<std::pair<int32_t, std::string>> escapes;
+  size_t added_len = 0; // total number of characters
+
+  std::sregex_iterator it(str.begin(), str.end(), ansi_escape);
+  std::sregex_iterator end;
+  while (it != end) {
+    escapes.emplace_back(it->position() - added_len, it->str());
+    added_len += it->str().size();
+    ++it;
+  }
+
+  std::string new_status =
+      result.substr(0, elide_size) + "..." +
+      result.substr(result.size() - elide_size - ((width - kMargin) % 2));
+
+  added_len = 0;
+  // We need to put all ANSI escape codes back in:
+  for (const auto &escape : escapes) {
+    int32_t pos = escape.first;
+    if (pos > elide_size) {
+      pos -= result.size() - width;
+      if (pos < static_cast<int32_t>(width) - elide_size) {
+        pos = width - elide_size - (width % 2 == 0 ? 1 : 0);
+      }
+    }
+    pos += added_len;
+    new_status.insert(pos, escape.second);
+    added_len += escape.second.size();
+  }
+  return new_status;
+}
+
+void update_build_line(BuildState &state) {
+  std::string line = "[" + std::to_string(state.completed_edges) + "/";
+  if (state.total_edges_known)
+    line += std::to_string(state.total_edges);
+  else
+    line += "???";
+  line += "] " + state.last_description;
+
+  winsize size;
+  if ((ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0) && size.ws_col) {
+    line = ElideMiddle(line, size.ws_col);
+  }
+  printf("\r%s\x1B[K", line.c_str());
+  fflush(stdout);
+}
 
 void schedule_subprocess(BuildState &state, Edge *e) {
   if (state.subprocesses.size() >= state.parallelism) {
@@ -724,15 +842,24 @@ void schedule_subprocess(BuildState &state, Edge *e) {
   vars_t rule_vars = parse_indented_vars(e->rule.begin);
   vars_t build_vars = parse_indented_vars(e->vars);
 
-  auto command_var = rule_vars.find("command");
-  if (command_var == rule_vars.end())
-    error("rule missing command");
-  Var &v = command_var->second;
   ExpansionScope es(e->scope);
   es.build_edge = e;
   es.rule_vars = &rule_vars;
   es.build_vars = &build_vars;
-  std::string command = var_expansion(v, es);
+
+  auto command_var = rule_vars.find("command");
+  if (command_var == rule_vars.end())
+    error("rule missing command");
+  std::string command = var_expansion(command_var->second, es);
+
+  std::string description;
+  auto description_var = rule_vars.find("description");
+  if (description_var == rule_vars.end())
+    description = command;
+  else
+    description = var_expansion(description_var->second, es);
+  state.last_description = description;
+  update_build_line(state);
 
   int fds[2];
   if (pipe2(fds, O_CLOEXEC) != 0)
@@ -756,20 +883,112 @@ void schedule_subprocess(BuildState &state, Edge *e) {
   proc.edge = e;
   proc.fd = fds[0];
 
-  print_difference(now(), prog_begin);
-  printf("schedule '%s' (pid %d)\n", command.c_str(), proc.pid);
+  dbg("schedule '%s' (pid %d)\n", command.c_str(), proc.pid);
   state.subprocesses.push_back(proc);
+}
+
+std::optional<HashResult> compute_edge_hash(Edge *e);
+
+void compute_edge_dirty(Edge *e) {
+  if (e->rule.begin) {
+    std::optional<HashResult> hash = compute_edge_hash(e);
+    std::optional<HashResult> bl_hash = e->outputs[0]->build_log_hash;
+    e->dirty = (hash && bl_hash) ? *hash != *bl_hash : true;
+  } else {
+    e->dirty = false;
+  }
+}
+
+// The build log is a combination of the build log and the deps log from the
+// existing implementation of Ninja. It consists of a list of concatenated build
+// log entries. Each build log entry takes one of the following forms:
+// 1. A node introducer, consisting of a canonicalized path name followed by a
+//    null terminator. Each node introducer causes a node slot number to be
+//    allocated starting from 0.
+// 2. A node manifest. Each node manifest consists of the following items:
+//    a. A null byte. Because paths always contain at least one character,
+//       a node manifest can always be distinguished from a node introducer.
+//    b. A 4-byte node slot number.
+//    c. A 16-byte XXH128 hash that combines the hashes of the text of the build
+//       statement, the rule, and (TODO) the referenced variables, and the
+//       mtimes of the input and output files.
+//    d. (TODO) A list of slot numbers for the filenames read from the depfile.
+void read_build_log(Global &global, BuildState &state) {
+  state.log_fd = open(".pom_log", O_CREAT | O_RDWR | O_CLOEXEC, 0644);
+  if (state.log_fd < 0)
+    error("failed to open build log");
+  size_t size = lseek(state.log_fd, 0, SEEK_END);
+  if (size == 0)
+    return;
+
+  void *addr = mmap(0, size, PROT_READ, MAP_PRIVATE, state.log_fd, 0);
+  if (addr == MAP_FAILED)
+    error("failed to map file");
+  char *pos = (char *)addr;
+  char *end = pos + size;
+
+  std::vector<Node *> nodes;
+  auto *tmp_node = new Node;
+  while (pos < end) {
+    size_t node_len = strnlen(pos, end - pos);
+    if (pos + node_len == end)
+      error("invalid build log file");
+    if (node_len == 0) {
+      if (end - pos < 21)
+        error("invalid build log file");
+      uint32_t idx;
+      HashResult hash;
+      memcpy(&idx, pos + 1, 4);
+      memcpy(&hash, pos + 5, 16);
+      if (idx >= nodes.size())
+        error("invalid build log file");
+      nodes[idx]->build_log_hash = hash;
+      pos += 21;
+    } else {
+      tmp_node->path = std::string_view(pos, node_len);
+      Node *n;
+      if (global.nodes.try_emplace_l(
+              tmp_node->path, [&](auto &val) { n = val.second; }, tmp_node)) {
+        n = tmp_node;
+        tmp_node = new Node;
+      }
+      n->build_log_index = nodes.size();
+      nodes.push_back(n);
+      pos += node_len + 1;
+    }
+  }
+  delete tmp_node;
+  state.build_log_next_index = nodes.size();
+}
+
+void write_build_log(BuildState &state, Edge *e) {
+  auto introduce_node = [&](Node *n) {
+    if (n->build_log_index != -1u)
+      return n->build_log_index;
+    write(state.log_fd, n->path.data(), n->path.size());
+    write(state.log_fd, "", 1);
+    return n->build_log_index = state.build_log_next_index++;
+  };
+  std::optional<HashResult> hash = compute_edge_hash(e);
+  if (hash) {
+    uint32_t idx = introduce_node(e->outputs[0]);
+    write(state.log_fd, "", 1);
+    write(state.log_fd, &idx, 4);
+    write(state.log_fd, &*hash, 16);
+  }
 }
 
 void monitor_subprocesses(BuildState &state) {
   auto handle_termination = [&](decltype(state.subprocesses)::iterator i) {
+    if (!i->stdout.empty())
+      printf("\n%s", i->stdout.c_str());
     int wstatus;
     if (waitpid(i->pid, &wstatus, 0) < 0)
       error("waitpid failed");
     if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0)
       error("subprocess exited abnormally");
-    print_difference(now(), prog_begin);
-    printf("pid %d exited\n", i->pid);
+    dbg("pid %d exited\n", i->pid);
+    ++state.completed_edges;
     Edge *e = i->edge;
     close(i->fd);
     state.subprocesses.erase(i);
@@ -779,79 +998,131 @@ void monitor_subprocesses(BuildState &state) {
       schedule_subprocess(state, next);
     }
     e->dirty = false;
-    // FIXME: restat outputs.
+    for (Node *n : e->outputs)
+      n->statted = false;
+    write_build_log(state, e);
     std::deque<Edge *> cleaned_edges;
     cleaned_edges.push_back(e);
     while (!cleaned_edges.empty()) {
       Edge *e = cleaned_edges.front();
       cleaned_edges.pop_front();
-      std::set<Edge *> visited;
       for (Node *output : e->outputs) {
+        std::set<Edge *> visited;
         for (Edge *out_edge : output->out_edges) {
-          if (!visited.insert(out_edge).second)
+          if (!out_edge->dirty || !visited.insert(out_edge).second)
             continue;
-          bool cleaned_deps = true;
+          bool cleaned_all_deps = true;
           for (Node *input : out_edge->inputs) {
             if (input->in_edge && input->in_edge->dirty) {
-              cleaned_deps = false;
+              cleaned_all_deps = false;
               break;
             }
           }
-          if (cleaned_deps) {
-            // FIXME: recompute hashes.
-            if (out_edge->rule.begin) {
+          if (cleaned_all_deps) {
+            compute_edge_dirty(out_edge);
+            if (out_edge->dirty) {
               schedule_subprocess(state, out_edge);
             } else {
-              out_edge->dirty = false;
               cleaned_edges.push_back(out_edge);
+              if (out_edge->rule.begin)
+                --state.total_edges;
             }
           }
         }
       }
     }
-    return state.subprocesses.empty();
   };
-  while (1) {
+  if (state.subprocesses.empty()) {
+    puts("ninja: no work to do.");
+    return;
+  }
+  update_build_line(state);
+  while (!state.subprocesses.empty()) {
     std::vector<decltype(state.subprocesses)::iterator> procs;
     std::vector<pollfd> pfds;
     for (auto i = state.subprocesses.begin(); i != state.subprocesses.end();
          ++i) {
       procs.push_back(i);
-      pfds.push_back({i->fd, POLLIN | POLLHUP, 0});
+      pfds.push_back({i->fd, POLLIN, 0});
     }
     if (poll(pfds.data(), pfds.size(), -1) < 0)
       error("poll failed");
     for (size_t i = 0; i != pfds.size(); ++i) {
       char buf[4096];
-      if (pfds[i].revents & POLLIN) {
-      retry:
-        size_t size = read(pfds[i].fd, buf, 4096);
-        if (size < 0) {
-          if (errno == EINTR)
-            goto retry;
+      if (pfds[i].revents) {
+        size_t size;
+        while ((size = read(pfds[i].fd, buf, 4096)) < 0 && errno == EINTR)
+          ;
+        if (size < 0)
           error("read failed");
-        }
-        if (size == 0) {
-          if (handle_termination(procs[i]))
-            return;
-          continue;
-        }
         procs[i]->stdout.append(buf, size);
-      }
-      if (pfds[i].revents & POLLHUP) {
-        while (size_t size = read(pfds[i].fd, buf, 4096)) {
-          if (size < 0) {
-            if (errno == EINTR)
-              continue;
-            error("read failed");
-          }
-          procs[i]->stdout.append(buf, size);
-        }
-        if (handle_termination(procs[i]))
-          return;
+        if (size == 0)
+          handle_termination(procs[i]);
       }
     }
   }
+  update_build_line(state);
+  puts("");
+}
+
+std::optional<HashResult> compute_edge_hash(Edge *e) {
+  // Skip phony edges. These are handled recursively when computing the Merkle
+  // tree for the referents (see add_inputs below).
+  if (!e->rule.begin)
+    return std::nullopt;
+  std::vector<uint64_t> merkle;
+  auto stat_node = [](Node *n) {
+    // This function returns true if the file does not exist. This leads
+    // to an early return without computing the hash. This is because there is
+    // no point in computing the hash if a file is missing, because that means
+    // that we'll need to rebuild anyway.
+    //
+    // Note that this function allows multiple tasks to begin stat'ing the
+    // same file. Although it's racy, it's a benign race because each stat
+    // will read the same mtime.
+    if (n->statted.load(std::memory_order_acquire))
+      return n->nonexistent;
+    struct stat s;
+    if (stat(std::string(n->path).c_str(), &s) == 0) {
+      n->mtime = s.st_mtim;
+      n->nonexistent = false;
+    } else {
+      n->nonexistent = true;
+    }
+    n->statted.store(true, std::memory_order_release);
+    return n->nonexistent;
+  };
+  auto add_node = [&](Node *n) {
+    if (stat_node(n))
+      return true;
+    merkle.push_back(n->mtime.tv_sec);
+    merkle.push_back(n->mtime.tv_nsec);
+    return false;
+  };
+  for (Node *n : e->outputs)
+    if (add_node(n))
+      return std::nullopt;
+  std::function<bool(Edge *)> add_inputs;
+  add_inputs = [&](Edge *e) {
+    merkle.push_back(e->hash.lo);
+    merkle.push_back(e->hash.hi);
+    for (Node *n : e->non_order_only_inputs()) {
+      if (n->in_edge && !n->in_edge->rule.begin) {
+        if (add_inputs(n->in_edge))
+          return true;
+      } else if (add_node(n)) {
+        if (!n->in_edge)
+          error("missing input file");
+        return true;
+      }
+    }
+    return false;
+  };
+  if (add_inputs(e))
+    return std::nullopt;
+  merkle.push_back(e->rule.hash.lo);
+  merkle.push_back(e->rule.hash.hi);
+  return hash_buf(merkle.data(), 8 * merkle.size());
 }
 
 // The work identification phase of Ninja can be thought of as requiring the
@@ -908,66 +1179,8 @@ void monitor_subprocesses(BuildState &state) {
 // wait until after all tasks are finished with step 2.
 void classify_edges(std::span<Edge *const> edges, size_t task_id,
                     std::atomic<size_t> &task_count, BuildState &state) {
-  std::vector<uint64_t> merkle;
-  for (Edge *e : edges) {
-    // Skip phony edges. These are handled recursively when computing the Merkle
-    // tree for the referents (see add_inputs below).
-    if (!e->rule.begin)
-      continue;
-    merkle.clear();
-    auto stat_node = [](Node *n) {
-      // This function returns true if the file does not exist. This leads
-      // to an early exit to the next loop iteration without computing the hash.
-      // This is because there is no point in computing the hash if a file is
-      // missing, because that means that we'll need to rebuild anyway.
-      //
-      // Note that this function allows multiple tasks to begin stat'ing the
-      // same file. Although it's racy, it's a benign race because each stat
-      // will read the same mtime.
-      if (n->statted.load(std::memory_order_acquire))
-        return n->nonexistent;
-      struct stat s;
-      if (stat(std::string(n->path).c_str(), &s) == 0)
-        n->mtime = s.st_mtim;
-      else
-        n->nonexistent = true;
-      n->statted.store(true, std::memory_order_release);
-      return n->nonexistent;
-    };
-    auto add_node = [&](Node *n) {
-      if (stat_node(n))
-        return true;
-      merkle.push_back(n->mtime.tv_sec);
-      merkle.push_back(n->mtime.tv_nsec);
-      return false;
-    };
-    std::function<bool(Edge *)> add_inputs;
-    for (Node *n : e->outputs)
-      if (add_node(n))
-        goto next_edge;
-    add_inputs = [&](Edge *e) {
-      merkle.push_back(e->hash.lo);
-      merkle.push_back(e->hash.hi);
-      for (Node *n : e->inputs) {
-        if (n->in_edge && !n->in_edge->rule.begin) {
-          if (add_inputs(n->in_edge))
-            return true;
-        } else if (add_node(n)) {
-          if (!n->in_edge)
-            error("missing input file");
-          return true;
-        }
-      }
-      return false;
-    };
-    if (add_inputs(e))
-      goto next_edge;
-    merkle.push_back(e->rule.hash.lo);
-    merkle.push_back(e->rule.hash.hi);
-    e->full_hash = hash_buf(merkle.data(), 8 * merkle.size());
-  next_edge:
-    e->dirty = true;
-  }
+  for (Edge *e : edges)
+    compute_edge_dirty(e);
   while (task_count.load(std::memory_order_acquire) != task_id)
     ;
   for (Edge *e : edges) {
@@ -980,12 +1193,13 @@ void classify_edges(std::span<Edge *const> edges, size_t task_id,
     }
     if (has_dirty_dep)
       e->dirty = true;
-    else if (e->dirty) {
+    if (e->dirty && e->rule.begin)
+      ++state.total_edges;
+    if (e->dirty && !has_dirty_dep) {
       static bool first = false;
       if (!first) {
         first = true;
-        print_difference(now(), prog_begin);
-        printf("schedule first task\n");
+        dbg("schedule first task\n");
       }
       schedule_subprocess(state, e);
     }
@@ -1001,10 +1215,8 @@ void mark(tbb::task_group &tg, Node *n, std::vector<Edge *> &needed_edges,
   if (e->needed)
     return;
   e->needed = true;
-  for (Node *dep : e->inputs) {
-    // dep->out_edges.push_back(e);
+  for (Node *dep : e->inputs)
     mark(tg, dep, needed_edges, task_id, task_count, state);
-  }
   needed_edges.push_back(e);
   constexpr size_t chunk_size = 1024;
   if (needed_edges.size() == chunk_size) {
@@ -1044,9 +1256,12 @@ vars_t parse_indented_vars(char *pos) {
   return result;
 }
 
-Global parse(std::string_view path) {
+Global parse(std::string_view path, BuildState *state_for_build_log) {
   Global global;
   tbb::task_group tg;
+  if (state_for_build_log) {
+    tg.run([&]() { read_build_log(global, *state_for_build_log); });
+  }
   parse_scope(tg, global, nullptr, path);
   tg.wait();
   return global;
@@ -1101,15 +1316,15 @@ int main(int argc, char **argv) {
     }
   }
 
-  Global global = parse(manifest_path);
+  bool build_log_required = tool == "";
+  BuildState state;
+  Global global = parse(manifest_path, build_log_required ? &state : nullptr);
   if (tool == "") {
-    print_difference(now(), prog_begin);
-    printf("%zu nodes\n", global.nodes.size());
+    dbg("%zu nodes\n", global.nodes.size());
     std::vector<Edge *> needed_edges;
     tbb::task_group tg;
     size_t task_id = 0;
     std::atomic<size_t> task_count = 0;
-    BuildState state;
     for (auto target : targets) {
       Node *n = global.nodes[target];
       if (!n)
@@ -1118,11 +1333,10 @@ int main(int argc, char **argv) {
     }
     classify_edges(needed_edges, task_id, task_count, state);
     tg.wait();
-    print_difference(now(), prog_begin);
-    printf("monitoring subprocesses\n");
+    state.total_edges_known = true;
+    dbg("monitoring subprocesses\n");
     monitor_subprocesses(state);
-    print_difference(now(), prog_begin);
-    printf("done\n");
+    dbg("done\n");
   } else if (tool == "commands") {
     for (auto target : targets) {
       Node *n = global.nodes[target];
