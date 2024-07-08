@@ -31,7 +31,6 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/types.h>
-#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
@@ -47,7 +46,82 @@
 #define XXH_INLINE_ALL
 #include "xxhash.h"
 
+#include "depfile_parser.h"
+
 using namespace oneapi;
+
+// This implementation of Ninja uses SIMD and parallelism to achieve
+// significantly faster time-to-first-build-command than the existing
+// implementation. On the author's machine, an M2 Max Macbook Pro running Linux,
+// we can start executing build commands in Chromium's GN based build system
+// ("chrome" target) in 200ms while the existing Ninja implementation takes 3.5
+// seconds. The null build time has not been measured for Chromium because it
+// doesn't build out of the box on Linux/arm64, but here are the null build
+// times for LLVM:
+//
+//                         Ninja  Ninja-SIMD
+// llvm-ar (CMake build)   175ms     42ms
+// clang (GN build)         70ms     18ms
+//
+// FIXME: The implementation currently does not support the following:
+// - Architectures other than arm64.
+// - Non-POSIX operating systems (only tested on Linux).
+// - Generator rules, pools, dyndeps, and likely several other features and
+//   parsing corner cases that GN/CMake/Meson do not use (at least for C++).
+//
+// Here's an overview of an example parallel task execution flow:
+//
+// clang-format off
+//
+//         /--- parse build log --------------------------------------------------------------------------------\
+//         |                                                /- parse subninja build statements (batch 1/2) ------\
+//         |                        /-- scan subninja file --- parse subninja build statements (batch 2/2) --------- identify build commands
+//  START ----- scan root manifest ---- parse root manifest build statements (batch 1/2) ------------------------/
+//                                  \-- parse root manifest build statements (batch 2/2) -----------------------/
+//
+// clang-format on
+//
+// In the "scan" phase (phase 1), we use SIMD instructions to rapidly search an
+// input file for top-level entities, such as build statements, rules and
+// subninja statements, parse certain top-level entities and compute hashes for
+// top-level entities that may be involved in the evaluation of a build
+// statement command. In the "parse" phase (phase 2), we parse build statements,
+// using SIMD for tokenization, and add them to a concurrent hash map that maps
+// from paths to node pointers. Batches of build statements identified in phase
+// 1 are processed in parallel, and so are any identified subninja files.
+//
+// In parallel with parsing build manifests, we also parse the build log. For
+// details, including an overview of the format, please see the comment at the
+// top of the read_build_log() function.
+//
+// After parsing is complete, we are ready to identify an initial set of build
+// commands. This is achieved with a post-order traversal of the build graph,
+// starting with the nodes that the user specified on the command line, in which
+// we compute a Merkle hash of each edge based on the mtimes of the input
+// and output files and the hashes of top-level entities that were computed
+// previously. This is done in a specific way so that we can stat() nodes in
+// parallel as well as starting commands for dirty nodes as soon as they are
+// identified. For details, please see the comment at the top of the
+// classify_edges() function.
+//
+// After the initial set of build commands is identified and started, we just
+// need to wait for the commands to complete and start any commands that were
+// unblocked by commands that exit. This is done single-threaded, in a similar
+// way to the existing implementation of Ninja, because at this point the
+// performance of Ninja is no longer a bottleneck.
+//
+// Special thanks:
+// - Evan Martin for the initial implementation of Ninja and for the idea of
+//   using hashes to detect dirty nodes, as implemented in n2 [1].
+// - John Keiser and Daniel Lemire for the SIMD vectorized character
+//   classification technique first used in simdjson [2].
+// - Rui Ueyama for the suggestion to use simdjson-like techniques for parsing
+//   Ninja files and for speeding up the the stuff that happens at the end of a
+//   build so we have no excuse not to speed up the stuff that happens at the
+//   beginning as well.
+//
+// [1] https://neugierig.org/software/blog/2022/03/n2.html
+// [2] https://arxiv.org/pdf/1902.08318
 
 struct HashResult {
   uint64_t lo, hi;
@@ -80,6 +154,9 @@ struct Scope;
 struct Edge {
   Scope *scope;
   std::vector<Node *> outputs, inputs;
+  size_t first_implicit_output = -1ul;
+  size_t first_implicit_input = -1ul;
+  size_t first_order_only_input = -1ul;
   std::span<Node *> explicit_outputs() {
     return std::span<Node *>(outputs).subspan(0, first_implicit_output);
   }
@@ -90,9 +167,6 @@ struct Edge {
     return std::span<Node *>(inputs).subspan(0, first_order_only_input);
   }
   Rule rule;
-  size_t first_implicit_output = -1ul;
-  size_t first_implicit_input = -1ul;
-  size_t first_order_only_input = -1ul;
   char *vars;
   HashResult hash;
   bool dirty = false;
@@ -109,6 +183,7 @@ struct Node {
   struct timespec mtime;
   uint32_t build_log_index = -1u;
   std::optional<HashResult> build_log_hash;
+  std::vector<Node *> depfile_inputs;
 };
 
 struct Global {
@@ -182,6 +257,18 @@ void append_named_var_expansion(std::string &buf, std::string_view name,
       }
       buf.pop_back();
     };
+    // FIXME: "in", "in_newline" and "out" are supposed to be expanded as
+    // written in the manifest file (after variable expansion), rather than
+    // after canonicalization. In the original implementation of Ninja, this is
+    // implemented by storing enough information about each path name in the
+    // Node to allow them to be "decanonicalized" (see the Node::slash_bits_
+    // field). Since the decanonicalized form is only needed if we actually need
+    // to run a command, this seems suboptimal as well as being more
+    // complicated, especially with this implementation of Ninja where there are
+    // also concurrency concerns, since multiple threads could be creating the
+    // same node. A better approach would probably be to use the edge's pointer
+    // into the build manifest to lex the input/output file tokens again and
+    // re-expand variable references.
     if (name == "in") {
       expand_node_list(es.build_edge->explicit_inputs(), ' ');
       return;
@@ -752,6 +839,8 @@ struct Subprocess {
   int fd;
   int pid;
   std::string stdout;
+  std::string depfile;
+  std::string rspfile;
 };
 
 struct BuildState {
@@ -833,6 +922,19 @@ void update_build_line(BuildState &state) {
   fflush(stdout);
 }
 
+// Equivalent to mkdir -p $(dirname path)
+void mkdirs(std::string_view path) {
+  size_t slash_pos = 0;
+  while (1) {
+    slash_pos = path.find('/', slash_pos + 1);
+    if (slash_pos == std::string_view::npos)
+      break;
+    int ret = mkdir(std::string(path.substr(0, slash_pos)).c_str(), 0755);
+    if (ret != 0 && errno != EEXIST)
+      error("mkdirs failed");
+  }
+}
+
 void schedule_subprocess(BuildState &state, Edge *e) {
   if (state.subprocesses.size() >= state.parallelism) {
     state.pending_edges.push_back(e);
@@ -861,11 +963,45 @@ void schedule_subprocess(BuildState &state, Edge *e) {
   state.last_description = description;
   update_build_line(state);
 
+  Subprocess proc;
+
+  for (Node *out : e->outputs)
+    if (out->nonexistent)
+      mkdirs(out->path);
+
+  auto depfile_var = rule_vars.find("depfile");
+  if (depfile_var != rule_vars.end()) {
+    proc.depfile = var_expansion(depfile_var->second, es);
+    mkdirs(proc.depfile);
+  }
+
+  auto rspfile_var = rule_vars.find("rspfile");
+  if (rspfile_var != rule_vars.end()) {
+    proc.rspfile = var_expansion(rspfile_var->second, es);
+    mkdirs(proc.rspfile);
+
+    auto rspfile_content_var = rule_vars.find("rspfile_content");
+    if (rspfile_content_var == rule_vars.end())
+      error("rspfile rule missing rspfile_content");
+    std::string rspfile_content =
+        var_expansion(rspfile_content_var->second, es);
+    int fd = open(proc.rspfile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+      error("rspfile open failed");
+    ssize_t size;
+    while ((size = write(fd, rspfile_content.c_str(), rspfile_content.size())) <
+               0 &&
+           errno == EINTR)
+      ;
+    if (size < 0)
+      error("rspfile write failed");
+    close(fd);
+  }
+
   int fds[2];
   if (pipe2(fds, O_CLOEXEC) != 0)
     error("pipe2 failed");
 
-  Subprocess proc;
   posix_spawn_file_actions_t actions;
   if (posix_spawn_file_actions_init(&actions) != 0)
     error("posix_spawn_file_actions_init failed");
@@ -884,7 +1020,7 @@ void schedule_subprocess(BuildState &state, Edge *e) {
   proc.fd = fds[0];
 
   dbg("schedule '%s' (pid %d)\n", command.c_str(), proc.pid);
-  state.subprocesses.push_back(proc);
+  state.subprocesses.push_back(std::move(proc));
 }
 
 std::optional<HashResult> compute_edge_hash(Edge *e);
@@ -900,8 +1036,11 @@ void compute_edge_dirty(Edge *e) {
 }
 
 // The build log is a combination of the build log and the deps log from the
-// existing implementation of Ninja. It consists of a list of concatenated build
-// log entries. Each build log entry takes one of the following forms:
+// existing implementation of Ninja. Like the build log and deps log, it's
+// designed so that incremental builds can just append to the file. It should
+// also be possible to implement recompaction, but that's not done yet. It
+// consists of a list of concatenated build log entries. Each build log entry
+// takes one of the following forms:
 // 1. A node introducer, consisting of a canonicalized path name followed by a
 //    null terminator. Each node introducer causes a node slot number to be
 //    allocated starting from 0.
@@ -910,9 +1049,15 @@ void compute_edge_dirty(Edge *e) {
 //       a node manifest can always be distinguished from a node introducer.
 //    b. A 4-byte node slot number.
 //    c. A 16-byte XXH128 hash that combines the hashes of the text of the build
-//       statement, the rule, and (TODO) the referenced variables, and the
-//       mtimes of the input and output files.
-//    d. (TODO) A list of slot numbers for the filenames read from the depfile.
+//       statement, the rule, and (TODO) the referenced variables, the
+//       mtimes of the input and output files and the mtimes of the filenames
+//       read from the depfile.
+//    d. A list of slot numbers for the filenames read from the depfile.
+//
+// FIXME: This file format is not self-synchronizing so it can't be trivially
+// parsed in parallel. In a null build of clang (GN build), the build log parser
+// ends up blocking progress. It may become necessary to redesign the format
+// and/or the parser to support parallel parsing.
 void read_build_log(Global &global, BuildState &state) {
   state.log_fd = open(".pom_log", O_CREAT | O_RDWR | O_CLOEXEC, 0644);
   if (state.log_fd < 0)
@@ -934,16 +1079,29 @@ void read_build_log(Global &global, BuildState &state) {
     if (pos + node_len == end)
       error("invalid build log file");
     if (node_len == 0) {
-      if (end - pos < 21)
+      if (end - pos < 25)
         error("invalid build log file");
       uint32_t idx;
       HashResult hash;
       memcpy(&idx, pos + 1, 4);
-      memcpy(&hash, pos + 5, 16);
       if (idx >= nodes.size())
         error("invalid build log file");
-      nodes[idx]->build_log_hash = hash;
-      pos += 21;
+      Node *node = nodes[idx];
+      memcpy(&hash, pos + 5, 16);
+      node->build_log_hash = hash;
+      uint32_t depfile_idx_count;
+      memcpy(&depfile_idx_count, pos + 21, 4);
+      if (end - pos < 25 + 4 * depfile_idx_count)
+        error("invalid build log file");
+      node->depfile_inputs.clear();
+      for (uint32_t i = 0; i != depfile_idx_count; ++i) {
+        uint32_t depfile_idx;
+        memcpy(&depfile_idx, pos + 25 + 4 * i, 4);
+        if (depfile_idx >= nodes.size())
+          error("invalid build log file");
+        node->depfile_inputs.push_back(nodes[depfile_idx]);
+      }
+      pos += 25 + 4 * depfile_idx_count;
     } else {
       tmp_node->path = std::string_view(pos, node_len);
       Node *n;
@@ -959,26 +1117,36 @@ void read_build_log(Global &global, BuildState &state) {
   }
   delete tmp_node;
   state.build_log_next_index = nodes.size();
+  dbg("done reading build log\n");
 }
 
 void write_build_log(BuildState &state, Edge *e) {
   auto introduce_node = [&](Node *n) {
     if (n->build_log_index != -1u)
       return n->build_log_index;
+    if (n->path.empty())
+      error("attempt to introduce an empty path");
     write(state.log_fd, n->path.data(), n->path.size());
     write(state.log_fd, "", 1);
     return n->build_log_index = state.build_log_next_index++;
   };
+  std::vector<uint32_t> depfile_idxs;
+  for (Node *n : e->outputs[0]->depfile_inputs)
+    depfile_idxs.push_back(introduce_node(n));
   std::optional<HashResult> hash = compute_edge_hash(e);
   if (hash) {
     uint32_t idx = introduce_node(e->outputs[0]);
     write(state.log_fd, "", 1);
     write(state.log_fd, &idx, 4);
     write(state.log_fd, &*hash, 16);
+    uint32_t depfile_size = depfile_idxs.size();
+    write(state.log_fd, &depfile_size, 4);
+    for (uint32_t depfile_idx : depfile_idxs)
+      write(state.log_fd, &depfile_idx, 4);
   }
 }
 
-void monitor_subprocesses(BuildState &state) {
+void monitor_subprocesses(BuildState &state, Global &global) {
   auto handle_termination = [&](decltype(state.subprocesses)::iterator i) {
     if (!i->stdout.empty())
       printf("\n%s", i->stdout.c_str());
@@ -990,17 +1158,21 @@ void monitor_subprocesses(BuildState &state) {
     dbg("pid %d exited\n", i->pid);
     ++state.completed_edges;
     Edge *e = i->edge;
+    std::string depfile = std::move(i->depfile);
+    std::string rspfile = std::move(i->rspfile);
     close(i->fd);
     state.subprocesses.erase(i);
+
     if (!state.pending_edges.empty()) {
       Edge *next = state.pending_edges.front();
       state.pending_edges.pop_front();
       schedule_subprocess(state, next);
     }
+
     e->dirty = false;
     for (Node *n : e->outputs)
       n->statted = false;
-    write_build_log(state, e);
+
     std::deque<Edge *> cleaned_edges;
     cleaned_edges.push_back(e);
     while (!cleaned_edges.empty()) {
@@ -1031,6 +1203,53 @@ void monitor_subprocesses(BuildState &state) {
         }
       }
     }
+
+    if (!depfile.empty()) {
+      dbg("read depfile: %s\n", depfile.c_str());
+      int depfile_fd = open(depfile.c_str(), O_RDONLY);
+      if (depfile_fd < 0)
+        error("failed to open depfile");
+      size_t depfile_size = lseek(depfile_fd, 0, SEEK_END);
+      std::string depfile_content(depfile_size, '\0');
+      size_t size;
+      while ((size = pread(depfile_fd, depfile_content.data(), depfile_size,
+                           0)) < 0 &&
+             errno == EINTR)
+        ;
+      close(depfile_fd);
+      unlink(depfile.c_str());
+
+      DepfileParser parser;
+      std::string err;
+      if (!parser.Parse(&depfile_content, &err))
+        error("depfile parser failed");
+
+      auto &depfile_inputs = e->outputs[0]->depfile_inputs;
+      depfile_inputs.clear();
+      auto *tmp_node = new Node;
+      for (std::string_view input : parser.ins_) {
+        dbg("found depfile entry: %s\n", std::string(input).c_str());
+        std::string buf;
+        tmp_node->path_buf = canonicalize(input, buf);
+        tmp_node->path = tmp_node->path_buf;
+        Node *n;
+        if (global.nodes.try_emplace_l(
+                tmp_node->path, [&](auto &val) { n = val.second; }, tmp_node)) {
+          n = tmp_node;
+          tmp_node = new Node;
+        } else {
+          tmp_node->path_buf.clear();
+        }
+        depfile_inputs.push_back(n);
+      }
+      delete tmp_node;
+    } else {
+      e->outputs[0]->depfile_inputs.clear();
+    }
+    write_build_log(state, e);
+
+    if (!rspfile.empty())
+      unlink(rspfile.c_str());
   };
   if (state.subprocesses.empty()) {
     puts("ninja: no work to do.");
@@ -1120,6 +1339,9 @@ std::optional<HashResult> compute_edge_hash(Edge *e) {
   };
   if (add_inputs(e))
     return std::nullopt;
+  for (Node *n : e->outputs[0]->depfile_inputs)
+    if (add_node(n))
+      return std::nullopt;
   merkle.push_back(e->rule.hash.lo);
   merkle.push_back(e->rule.hash.hi);
   return hash_buf(merkle.data(), 8 * merkle.size());
@@ -1335,7 +1557,7 @@ int main(int argc, char **argv) {
     tg.wait();
     state.total_edges_known = true;
     dbg("monitoring subprocesses\n");
-    monitor_subprocesses(state);
+    monitor_subprocesses(state, global);
     dbg("done\n");
   } else if (tool == "commands") {
     for (auto target : targets) {
