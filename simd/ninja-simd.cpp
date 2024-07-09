@@ -40,6 +40,7 @@
 #include <sys/stat.h>
 
 #include "oneapi/tbb/concurrent_hash_map.h"
+#include "oneapi/tbb/parallel_for_each.h"
 #include "oneapi/tbb/task_group.h"
 #include <phmap.h>
 
@@ -72,6 +73,8 @@ using namespace oneapi;
 // Here's an overview of an example parallel task execution flow:
 //
 // clang-format off
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcomment"
 //
 //         /--- parse build log --------------------------------------------------------------------------------\
 //         |                                                /- parse subninja build statements (batch 1/2) ------\
@@ -79,6 +82,7 @@ using namespace oneapi;
 //  START ----- scan root manifest ---- parse root manifest build statements (batch 1/2) ------------------------/
 //                                  \-- parse root manifest build statements (batch 2/2) -----------------------/
 //
+#pragma GCC diagnostic pop
 // clang-format on
 //
 // In the "scan" phase (phase 1), we use SIMD instructions to rapidly search an
@@ -1054,10 +1058,14 @@ void compute_edge_dirty(Edge *e) {
 //       read from the depfile.
 //    d. A list of slot numbers for the filenames read from the depfile.
 //
+// Filling in the node data from the build log turns out to be expensive enough
+// to be a build bottleneck in a null build of Clang (GN build) unless it is
+// parallelized. Therefore we save a list of observed node manifest pointers and
+// use them to complete the node data in a parallel loop.
+//
 // FIXME: This file format is not self-synchronizing so it can't be trivially
-// parsed in parallel. In a null build of clang (GN build), the build log parser
-// ends up blocking progress. It may become necessary to redesign the format
-// and/or the parser to support parallel parsing.
+// processed in parallel. It may turn out to be necessary to redesign the format
+// and/or the parser to better support parallel processing.
 void read_build_log(Global &global, BuildState &state) {
   state.log_fd = open(".pom_log", O_CREAT | O_RDWR | O_CLOEXEC, 0644);
   if (state.log_fd < 0)
@@ -1073,6 +1081,7 @@ void read_build_log(Global &global, BuildState &state) {
   char *end = pos + size;
 
   std::vector<Node *> nodes;
+  std::vector<char *> data_pos;
   auto *tmp_node = new Node;
   while (pos < end) {
     size_t node_len = strnlen(pos, end - pos);
@@ -1082,25 +1091,16 @@ void read_build_log(Global &global, BuildState &state) {
       if (end - pos < 25)
         error("invalid build log file");
       uint32_t idx;
-      HashResult hash;
       memcpy(&idx, pos + 1, 4);
       if (idx >= nodes.size())
         error("invalid build log file");
-      Node *node = nodes[idx];
-      memcpy(&hash, pos + 5, 16);
-      node->build_log_hash = hash;
+      if (data_pos.size() <= idx)
+        data_pos.resize(idx + 1);
+      data_pos[idx] = pos + 5;
       uint32_t depfile_idx_count;
       memcpy(&depfile_idx_count, pos + 21, 4);
       if (end - pos < 25 + 4 * depfile_idx_count)
         error("invalid build log file");
-      node->depfile_inputs.clear();
-      for (uint32_t i = 0; i != depfile_idx_count; ++i) {
-        uint32_t depfile_idx;
-        memcpy(&depfile_idx, pos + 25 + 4 * i, 4);
-        if (depfile_idx >= nodes.size())
-          error("invalid build log file");
-        node->depfile_inputs.push_back(nodes[depfile_idx]);
-      }
       pos += 25 + 4 * depfile_idx_count;
     } else {
       tmp_node->path = std::string_view(pos, node_len);
@@ -1116,6 +1116,28 @@ void read_build_log(Global &global, BuildState &state) {
     }
   }
   delete tmp_node;
+  dbg("done scanning build log\n");
+
+  tbb::parallel_for_each(data_pos, [&](char *&pos) {
+    if (!pos)
+      return;
+    size_t idx = &pos - data_pos.data();
+    Node *node = nodes[idx];
+    HashResult hash;
+    memcpy(&hash, pos, 16);
+    node->build_log_hash = hash;
+    uint32_t depfile_idx_count;
+    memcpy(&depfile_idx_count, pos + 16, 4);
+    node->depfile_inputs.resize(depfile_idx_count);
+    for (uint32_t i = 0; i != depfile_idx_count; ++i) {
+      uint32_t depfile_idx;
+      memcpy(&depfile_idx, pos + 20 + 4 * i, 4);
+      if (depfile_idx >= nodes.size())
+        error("invalid build log file");
+      node->depfile_inputs[i] = nodes[depfile_idx];
+    }
+  });
+
   state.build_log_next_index = nodes.size();
   dbg("done reading build log\n");
 }
@@ -1486,6 +1508,7 @@ Global parse(std::string_view path, BuildState *state_for_build_log) {
   }
   parse_scope(tg, global, nullptr, path);
   tg.wait();
+  dbg("%zu nodes\n", global.nodes.size());
   return global;
 }
 
@@ -1538,11 +1561,10 @@ int main(int argc, char **argv) {
     }
   }
 
-  bool build_log_required = tool == "";
+  bool build_log_required = tool == "" || tool == "loadlog";
   BuildState state;
   Global global = parse(manifest_path, build_log_required ? &state : nullptr);
   if (tool == "") {
-    dbg("%zu nodes\n", global.nodes.size());
     std::vector<Edge *> needed_edges;
     tbb::task_group tg;
     size_t task_id = 0;
@@ -1566,6 +1588,7 @@ int main(int argc, char **argv) {
         error("unknown target");
       print_commands(n);
     }
+  } else if (tool == "loadlog") {
   } else {
     error("unsupported tool");
   }
