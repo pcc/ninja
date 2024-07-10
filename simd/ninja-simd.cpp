@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #include <algorithm>
-#include <arm_neon.h>
 #include <atomic>
 #include <ctime>
 #include <deque>
@@ -49,6 +48,15 @@
 
 #include "depfile_parser.h"
 
+#ifdef __aarch64__
+#include <arm_neon.h>
+#elif defined(__x86_64__)
+#include <emmintrin.h>
+#include <xmmintrin.h>
+#else
+#error "Unsupported architecture"
+#endif
+
 using namespace oneapi;
 
 // This implementation of Ninja uses SIMD and parallelism to achieve
@@ -65,7 +73,7 @@ using namespace oneapi;
 // clang (GN build)         70ms     18ms
 //
 // FIXME: The implementation currently does not support the following:
-// - Architectures other than arm64.
+// - Architectures other than arm64 and x86_64.
 // - Non-POSIX operating systems (only tested on Linux).
 // - Generator rules, pools, dyndeps, and likely several other features and
 //   parsing corner cases that GN/CMake/Meson do not use (at least for C++).
@@ -375,17 +383,76 @@ static bool is_unescaped_dollar(char *begin, char *pos) {
   return num_dollars % 2 == 1;
 }
 
+#ifdef __aarch64__
+using SIMDVec = uint8x16_t;
+
+static SIMDVec vec_dup(uint8_t c) {
+   return vdupq_n_u8(c);
+}
+
+static SIMDVec vec_eq(SIMDVec v1, SIMDVec v2) {
+  return vceqq_u8(v1, v2);
+}
+
+static SIMDVec vec_or(SIMDVec v1, SIMDVec v2) {
+  return vorrq_u8(v1, v2);
+}
+
 // Returns a vector that may be ANDed with a vector of comparison results which
 // may then be used as an input to UMAXV (max of all vector elements) to
 // identify the first all-ones element. The max will be 0 in case of no matches,
 // 16 if the first match was the first element, 15 if it's the second
 // element, etc. It's noinline because GCC wants to move a load of this vector
 // into the middle of our tight loops otherwise.
-__attribute__((noinline)) uint8x16_t first_all_ones_mask_identifier() {
-  uint8x16_t identifier = {16, 15, 14, 13, 12, 11, 10, 9,
-                           8,  7,  6,  5,  4,  3,  2,  1};
+__attribute__((noinline)) SIMDVec first_all_ones_mask_identifier() {
+  SIMDVec identifier = {
+    16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1
+  };
   return identifier;
 }
+
+static uint8_t first_all_ones(SIMDVec v, SIMDVec mask_identifier) {
+  return 16 - vmaxvq_u8(vandq_u8(v, identifier));
+}
+
+static bool has_all_ones(SIMDVec v) {
+  return vmaxvq_u8(v);
+}
+#elif defined(__x86_64__)
+using SIMDVec = __m128i;
+
+static SIMDVec vec_load(char *c) {
+  return _mm_loadu_si128((__m128i_u *)c);
+}
+
+static SIMDVec vec_dup(uint8_t c) {
+  return _mm_set1_epi8(c);
+}
+
+static SIMDVec vec_eq(SIMDVec v1, SIMDVec v2) {
+  return _mm_cmpeq_epi8(v1, v2);
+}
+
+static SIMDVec vec_or(SIMDVec v1, SIMDVec v2) {
+  return _mm_or_si128(v1, v2);
+}
+
+// The mask identifier is not needed on x86, but we return an empty struct so
+// that the client code can stay the same.
+struct NoMaskIdentifier {};
+static NoMaskIdentifier first_all_ones_mask_identifier() {
+  return NoMaskIdentifier();
+}
+
+static uint8_t first_all_ones(SIMDVec v, NoMaskIdentifier mask_identifier) {
+  uint16_t mask = _mm_movemask_epi8(v);
+  return __builtin_ctz(0x10000 | mask);
+}
+
+static bool has_all_ones(SIMDVec v) {
+  return _mm_movemask_epi8(v);
+}
+#endif
 
 // Consume a token and its following whitespace. Returns the token (without
 // whitespace).
@@ -458,44 +525,44 @@ inline std::string_view token(char *&pos, bool &simple) {
     // characters and checking if it is before the PTTC. At this point we don't
     // care where in the token the '$' is so when we terminate the loop we just
     // check for a non-zero accumulated dollar mask by using UMAXV.
-    uint8x16_t dollars = vdupq_n_u8('$');
-    uint8x16_t spaces = vdupq_n_u8(' ');
-    uint8x16_t colons = vdupq_n_u8(':');
-    uint8x16_t equals = vdupq_n_u8('=');
-    uint8x16_t newlines = vdupq_n_u8('\n');
-    uint8x16_t zeroes = vdupq_n_u8('\0');
-    uint8x16_t acc_dollar_mask = zeroes;
-    uint8x16_t identifier = first_all_ones_mask_identifier();
+    SIMDVec dollars = vec_dup('$');
+    SIMDVec spaces = vec_dup(' ');
+    SIMDVec colons = vec_dup(':');
+    SIMDVec equals = vec_dup('=');
+    SIMDVec newlines = vec_dup('\n');
+    SIMDVec zeroes = vec_dup('\0');
+    SIMDVec acc_dollar_mask = zeroes;
+    auto identifier = first_all_ones_mask_identifier();
     while (1) {
-      uint8x16_t chars = *(uint8x16_t *)pos;
-      uint8x16_t dollar_mask = vceqq_u8(chars, dollars);
-      uint8x16_t space_mask = vceqq_u8(chars, spaces);
-      uint8x16_t colon_mask = vceqq_u8(chars, colons);
-      uint8x16_t equal_mask = vceqq_u8(chars, equals);
-      uint8x16_t newline_mask = vceqq_u8(chars, newlines);
-      uint8x16_t zero_mask = vceqq_u8(chars, zeroes);
-      uint8x16_t mask = newline_mask;
+      SIMDVec chars = vec_load(pos);
+      SIMDVec dollar_mask = vec_eq(chars, dollars);
+      SIMDVec space_mask = vec_eq(chars, spaces);
+      SIMDVec colon_mask = vec_eq(chars, colons);
+      SIMDVec equal_mask = vec_eq(chars, equals);
+      SIMDVec newline_mask = vec_eq(chars, newlines);
+      SIMDVec zero_mask = vec_eq(chars, zeroes);
+      SIMDVec mask = newline_mask;
       if (Args & EqualsIsToken)
-        mask = vorrq_u8(mask, equal_mask);
+        mask = vec_or(mask, equal_mask);
       if (Args & ColonIsToken)
-        mask = vorrq_u8(mask, colon_mask);
+        mask = vec_or(mask, colon_mask);
       if (Args & SpaceIsSeparator)
-        mask = vorrq_u8(mask, space_mask);
-      mask = vorrq_u8(mask, zero_mask);
-      uint8_t max = vmaxvq_u8(vandq_u8(mask, identifier));
-      if (__builtin_expect(!max, 1)) {
+        mask = vec_or(mask, space_mask);
+      mask = vec_or(mask, zero_mask);
+      uint8_t first = first_all_ones(mask, identifier);
+      if (__builtin_expect(first == 16, 1)) {
         pos += 16;
-        acc_dollar_mask = vorrq_u8(acc_dollar_mask, dollar_mask);
+        acc_dollar_mask = vec_or(acc_dollar_mask, dollar_mask);
         continue;
       }
-      uint8_t dollar_max = vmaxvq_u8(vandq_u8(dollar_mask, identifier));
-      simple &= dollar_max < max;
-      pos += 16 - max;
+      uint8_t dollar_first = first_all_ones(dollar_mask, identifier);
+      simple &= dollar_first > first;
+      pos += first;
       if (*pos && is_unescaped_dollar(begin, pos - 1)) {
         pos++;
         continue;
       }
-      simple &= vmaxvq_u8(acc_dollar_mask) == 0;
+      simple &= !has_all_ones(acc_dollar_mask);
       if ((Args & SpaceIsSeparator) && *pos == ' ') {
         end = pos;
         pos++;
@@ -594,17 +661,17 @@ void parse_file_range(Global &global, Scope &scope, Phase1Scope &scope1,
     // FIXME: This misclassifies "# $\nfoo = bar" as a non-toplevel because
     // "$" at the end of a comment does not count as a continuation character.
     // We may need to keep track of whether the previous line is a comment.
-    uint8x16_t newlines = vdupq_n_u8('\n');
-    uint8x16_t identifier = first_all_ones_mask_identifier();
+    SIMDVec newlines = vec_dup('\n');
+    auto identifier = first_all_ones_mask_identifier();
     while (pos < end) {
-      uint8x16_t chars_m1 = *(uint8x16_t *)(pos - 1);
-      uint8x16_t mask = vceqq_u8(chars_m1, newlines);
-      uint8_t max = vmaxvq_u8(vandq_u8(mask, identifier));
-      if (__builtin_expect(!max, 1)) {
+      SIMDVec chars_m1 = vec_load(pos - 1);
+      SIMDVec mask = vec_eq(chars_m1, newlines);
+      uint8_t first = first_all_ones(mask, identifier);
+      if (__builtin_expect(first == 16, 1)) {
         pos += 16;
         continue;
       }
-      pos += 16 - max;
+      pos += first;
       // A blank line ends a toplevel. CMake leaves comments before each
       // toplevel, we don't want them to be included in the hash for the
       // previous one.
