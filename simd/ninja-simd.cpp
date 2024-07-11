@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <linux/prctl.h>
 #include <list>
+#include <optional>
 #include <poll.h>
 #include <regex>
 #include <set>
@@ -41,7 +42,6 @@
 #include "oneapi/tbb/concurrent_hash_map.h"
 #include "oneapi/tbb/parallel_for_each.h"
 #include "oneapi/tbb/task_group.h"
-#include <phmap.h>
 
 #define XXH_INLINE_ALL
 #include "xxhash.h"
@@ -142,6 +142,14 @@ struct HashResult {
   }
 };
 
+HashResult hash_buf(const void *buf, size_t size) {
+  auto h = XXH3_128bits(buf, size);
+  HashResult result;
+  result.lo = h.low64;
+  result.hi = h.high64;
+  return result;
+}
+
 struct Rule {
   char *begin;
   HashResult hash;
@@ -187,8 +195,9 @@ struct Edge {
 };
 
 struct Node {
-  std::string path_buf;
+  Node *next = nullptr;
   std::string_view path;
+  std::string path_buf;
   std::vector<Edge *> out_edges;
   Edge *in_edge = nullptr;
   bool nonexistent = false;
@@ -199,15 +208,77 @@ struct Node {
   std::vector<Node *> depfile_inputs;
 };
 
+// The BigMap is the hash table used for the path to node mapping. Because it
+// is a performance critical data structure, we use our own implementation that
+// only supports the operations that we need. In particular, because we do
+// not support resizing, the data structure can be made lock-free.
+//
+// Each bucket is an atomic pointer. The assumption is that the number of nodes
+// will be large, so the data structure consists of a fixed size array of 1M
+// bucket. (In the future we may consider dynamically sizing the array based on
+// a node count recorded in the build log.) Insertion operations add the new
+// node onto the head of the linked list stored in the bucket. Our first
+// compare-exchange assumes the bucket to be empty (given the array size, this
+// is likely to be true) and if that operation fails, we search the linked list
+// for an existing node and compare-exchange the old head with a new one if it
+// fails.
+struct BigMap {
+  static constexpr size_t array_size = 1<<20;
+  std::atomic<Node *> nodes[array_size] = {};
+
+  Node *operator[](std::string_view path) const {
+    HashResult hash = hash_buf(path.begin(), path.size());
+    Node *node = nodes[hash.lo & (BigMap::array_size - 1)];
+    while (node) {
+      if (node->path == path)
+        return node;
+      node = node->next;
+    }
+    return nullptr;
+  }
+
+  // Finds an existing node with path == tmp_node->path and returns it,
+  // otherwise inserts tmp_node into the map and returns it. If the insert
+  // operation succeeds, tmp_node will be replaced with a newly allocated node.
+  Node *get_or_insert(Node *&tmp_node) {
+    HashResult hash = hash_buf(tmp_node->path.begin(), tmp_node->path.size());
+    std::atomic<Node *> &slot = nodes[hash.lo & (BigMap::array_size - 1)];
+    Node *value = nullptr;
+    while (1) {
+      if (slot.compare_exchange_strong(value, tmp_node,
+                                       std::memory_order_acq_rel)) {
+        Node *inserted_node = tmp_node;
+        tmp_node = new Node;
+        return inserted_node;
+      }
+      Node *search = value;
+      while (search) {
+        if (search->path == tmp_node->path) {
+          tmp_node->next = nullptr;
+          tmp_node->path_buf.clear();
+          return search;
+        }
+        search = search->next;
+      }
+      tmp_node->next = value;
+    }
+  }
+
+  size_t size() const {
+    size_t size = 0;
+    for (Node *node : nodes) {
+      while (node) {
+        ++size;
+        node = node->next;
+      }
+    }
+    return size;
+  }
+};
+
 struct Global {
   tbb::concurrent_hash_map<std::string_view, char *> pool;
-  phmap::parallel_flat_hash_map<
-      std::string_view, Node *,
-      phmap::priv::hash_default_hash<std::string_view>,
-      phmap::priv::hash_default_eq<std::string_view>,
-      phmap::priv::Allocator<phmap::priv::Pair<const std::string_view, Node *>>,
-      12, std::mutex>
-      nodes;
+  BigMap nodes;
 };
 struct Scope {
   Scope *parent;
@@ -230,14 +301,6 @@ struct ExpansionScope {
 void error(const char *err) {
   fprintf(stderr, "error: %s\n", err);
   exit(1);
-}
-
-HashResult hash_buf(const void *buf, size_t size) {
-  auto h = XXH3_128bits(buf, size);
-  HashResult result;
-  result.lo = h.low64;
-  result.hi = h.high64;
-  return result;
 }
 
 void append_expansion(std::string &buf, std::string_view token,
@@ -791,15 +854,7 @@ void resolve_build(Global &global, Scope &scope, std::span<Rule> builds) {
         tmp_node->path = tmp_node->path_buf;
       }
       tmp_node->path = canonicalize(tmp_node->path, tmp_node->path_buf);
-      Node *n;
-      if (global.nodes.try_emplace_l(
-              tmp_node->path, [&](auto &val) { n = val.second; }, tmp_node)) {
-        n = tmp_node;
-        tmp_node = new Node;
-      } else {
-        tmp_node->path_buf.clear();
-      }
-      return n;
+      return global.nodes.get_or_insert(tmp_node);
     };
     while (1) {
       Var out = var_token<ColonIsToken | SpaceIsSeparator>(pos);
@@ -1172,12 +1227,7 @@ void read_build_log(Global &global, BuildState &state) {
       pos += 25 + 4 * depfile_idx_count;
     } else {
       tmp_node->path = std::string_view(pos, node_len);
-      Node *n;
-      if (global.nodes.try_emplace_l(
-              tmp_node->path, [&](auto &val) { n = val.second; }, tmp_node)) {
-        n = tmp_node;
-        tmp_node = new Node;
-      }
+      Node *n = global.nodes.get_or_insert(tmp_node);
       n->build_log_index = nodes.size();
       nodes.push_back(n);
       pos += node_len + 1;
@@ -1322,14 +1372,7 @@ void monitor_subprocesses(BuildState &state, Global &global) {
         std::string buf;
         tmp_node->path_buf = canonicalize(input, buf);
         tmp_node->path = tmp_node->path_buf;
-        Node *n;
-        if (global.nodes.try_emplace_l(
-                tmp_node->path, [&](auto &val) { n = val.second; }, tmp_node)) {
-          n = tmp_node;
-          tmp_node = new Node;
-        } else {
-          tmp_node->path_buf.clear();
-        }
+        Node *n = global.nodes.get_or_insert(tmp_node);
         depfile_inputs.push_back(n);
       }
       delete tmp_node;
@@ -1568,8 +1611,8 @@ vars_t parse_indented_vars(char *pos) {
   return result;
 }
 
-Global parse(std::string_view path, BuildState *state_for_build_log) {
-  Global global;
+void parse(Global& global, std::string_view path,
+           BuildState* state_for_build_log) {
   tbb::task_group tg;
   if (state_for_build_log) {
     tg.run([&]() { read_build_log(global, *state_for_build_log); });
@@ -1577,7 +1620,6 @@ Global parse(std::string_view path, BuildState *state_for_build_log) {
   parse_scope(tg, global, nullptr, path);
   tg.wait();
   dbg("%zu nodes\n", global.nodes.size());
-  return global;
 }
 
 void print_command(Edge *e) {
@@ -1631,14 +1673,15 @@ int main(int argc, char **argv) {
 
   bool build_log_required = tool == "" || tool == "loadlog";
   BuildState state;
-  Global global = parse(manifest_path, build_log_required ? &state : nullptr);
+  auto global = std::make_unique<Global>();
+  parse(*global, manifest_path, build_log_required ? &state : nullptr);
   if (tool == "") {
     std::vector<Edge *> needed_edges;
     tbb::task_group tg;
     size_t task_id = 0;
     std::atomic<size_t> task_count = 0;
     for (auto target : targets) {
-      Node *n = global.nodes[target];
+      Node *n = global->nodes[target];
       if (!n)
         error("unknown target");
       mark(tg, n, needed_edges, task_id, task_count, state);
@@ -1647,11 +1690,11 @@ int main(int argc, char **argv) {
     tg.wait();
     state.total_edges_known = true;
     dbg("monitoring subprocesses\n");
-    monitor_subprocesses(state, global);
+    monitor_subprocesses(state, *global);
     dbg("done\n");
   } else if (tool == "commands") {
     for (auto target : targets) {
-      Node *n = global.nodes[target];
+      Node *n = global->nodes[target];
       if (!n)
         error("unknown target");
       print_commands(n);
