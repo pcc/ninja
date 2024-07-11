@@ -1093,8 +1093,7 @@ void schedule_subprocess(BuildState &state, Edge *e) {
   Subprocess proc;
 
   for (Node *out : e->outputs)
-    if (out->nonexistent)
-      mkdirs(out->path);
+    mkdirs(out->path);
 
   auto depfile_var = rule_vars.find("depfile");
   if (depfile_var != rule_vars.end()) {
