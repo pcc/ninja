@@ -915,7 +915,7 @@ struct Subprocess {
 };
 
 struct BuildState {
-  size_t parallelism = 12;
+  size_t parallelism = sysconf(_SC_NPROCESSORS_ONLN) + 2;
   int log_fd;
   uint32_t build_log_next_index = 0;
   std::list<Subprocess> subprocesses;
