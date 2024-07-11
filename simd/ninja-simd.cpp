@@ -450,8 +450,12 @@ static bool is_unescaped_dollar(char *begin, char *pos) {
 #ifdef __aarch64__
 using SIMDVec = uint8x16_t;
 
+static SIMDVec vec_load(char *c) {
+  return *(SIMDVec *)c;
+}
+
 static SIMDVec vec_dup(uint8_t c) {
-   return vdupq_n_u8(c);
+  return vdupq_n_u8(c);
 }
 
 static SIMDVec vec_eq(SIMDVec v1, SIMDVec v2) {
@@ -476,7 +480,7 @@ __attribute__((noinline)) SIMDVec first_all_ones_mask_identifier() {
 }
 
 static uint8_t first_all_ones(SIMDVec v, SIMDVec mask_identifier) {
-  return 16 - vmaxvq_u8(vandq_u8(v, identifier));
+  return 16 - vmaxvq_u8(vandq_u8(v, mask_identifier));
 }
 
 static bool has_all_ones(SIMDVec v) {
