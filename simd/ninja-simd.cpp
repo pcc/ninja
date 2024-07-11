@@ -186,7 +186,7 @@ struct Edge {
   std::span<Node *> non_order_only_inputs() {
     return std::span<Node *>(inputs).subspan(0, first_order_only_input);
   }
-  Rule rule;
+  std::string_view rule_name;
   char *vars;
   HashResult hash;
   bool dirty = false;
@@ -876,21 +876,8 @@ void resolve_build(Global &global, Scope &scope, std::span<Rule> builds) {
       e->first_implicit_output = e->outputs.size();
     bool simple;
     std::string_view rule = token<ColonIsToken | SpaceIsSeparator>(pos, simple);
-    if (rule == "phony") {
-      e->rule = {};
-    } else {
-      Scope *cur_scope = &scope;
-      rules_t::const_iterator i;
-      while (cur_scope) {
-        i = cur_scope->rule.find(rule);
-        if (i != cur_scope->rule.end())
-          break;
-        cur_scope = cur_scope->parent;
-      }
-      if (!cur_scope)
-        error("could not find rule");
-      e->rule = i->second;
-    }
+    if (rule != "phony")
+      e->rule_name = rule;
     while (1) {
       Var in = var_token<ColonIsToken | SpaceIsSeparator>(pos);
       if (in.value == "|") {
@@ -1066,13 +1053,29 @@ void mkdirs(std::string_view path) {
   }
 }
 
+Rule* find_rule(Edge* e) {
+  Scope* cur_scope = e->scope;
+  std::string_view rule_name = e->rule_name;
+  rules_t::iterator i;
+  while (cur_scope) {
+    i = cur_scope->rule.find(rule_name);
+    if (i != cur_scope->rule.end())
+      break;
+    cur_scope = cur_scope->parent;
+  }
+  if (!cur_scope)
+    error("could not find rule");
+  return &i->second;
+}
+
 void schedule_subprocess(BuildState &state, Edge *e) {
   if (state.subprocesses.size() >= state.parallelism) {
     state.pending_edges.push_back(e);
     return;
   }
 
-  vars_t rule_vars = parse_indented_vars(e->rule.begin);
+  Rule *rule = find_rule(e);
+  vars_t rule_vars = parse_indented_vars(rule->begin);
   vars_t build_vars = parse_indented_vars(e->vars);
 
   ExpansionScope es(e->scope);
@@ -1156,7 +1159,7 @@ void schedule_subprocess(BuildState &state, Edge *e) {
 std::optional<HashResult> compute_edge_hash(Edge *e);
 
 void compute_edge_dirty(Edge *e) {
-  if (e->rule.begin) {
+  if (!e->rule_name.empty()) {
     std::optional<HashResult> hash = compute_edge_hash(e);
     std::optional<HashResult> bl_hash = e->outputs[0]->build_log_hash;
     e->dirty = (hash && bl_hash) ? *hash != *bl_hash : true;
@@ -1339,7 +1342,7 @@ void monitor_subprocesses(BuildState &state, Global &global) {
               schedule_subprocess(state, out_edge);
             } else {
               cleaned_edges.push_back(out_edge);
-              if (out_edge->rule.begin)
+              if (!out_edge->rule_name.empty())
                 --state.total_edges;
             }
           }
@@ -1423,7 +1426,7 @@ void monitor_subprocesses(BuildState &state, Global &global) {
 std::optional<HashResult> compute_edge_hash(Edge *e) {
   // Skip phony edges. These are handled recursively when computing the Merkle
   // tree for the referents (see add_inputs below).
-  if (!e->rule.begin)
+  if (e->rule_name.empty())
     return std::nullopt;
   std::vector<uint64_t> merkle;
   auto stat_node = [](Node *n) {
@@ -1462,7 +1465,7 @@ std::optional<HashResult> compute_edge_hash(Edge *e) {
     merkle.push_back(e->hash.lo);
     merkle.push_back(e->hash.hi);
     for (Node *n : e->non_order_only_inputs()) {
-      if (n->in_edge && !n->in_edge->rule.begin) {
+      if (n->in_edge && n->in_edge->rule_name.empty()) {
         if (add_inputs(n->in_edge))
           return true;
       } else if (add_node(n)) {
@@ -1478,8 +1481,9 @@ std::optional<HashResult> compute_edge_hash(Edge *e) {
   for (Node *n : e->outputs[0]->depfile_inputs)
     if (add_node(n))
       return std::nullopt;
-  merkle.push_back(e->rule.hash.lo);
-  merkle.push_back(e->rule.hash.hi);
+  Rule *rule = find_rule(e);
+  merkle.push_back(rule->hash.lo);
+  merkle.push_back(rule->hash.hi);
   return hash_buf(merkle.data(), 8 * merkle.size());
 }
 
@@ -1551,7 +1555,7 @@ void classify_edges(std::span<Edge *const> edges, size_t task_id,
     }
     if (has_dirty_dep)
       e->dirty = true;
-    if (e->dirty && e->rule.begin)
+    if (e->dirty && !e->rule_name.empty())
       ++state.total_edges;
     if (e->dirty && !has_dirty_dep) {
       static bool first = false;
@@ -1626,9 +1630,10 @@ void parse(Global& global, std::string_view path,
 }
 
 void print_command(Edge *e) {
-  if (!e->rule.begin)
+  if (e->rule_name.empty())
     return;
-  vars_t rule_vars = parse_indented_vars(e->rule.begin);
+  Rule *rule = find_rule(e);
+  vars_t rule_vars = parse_indented_vars(rule->begin);
   vars_t build_vars = parse_indented_vars(e->vars);
 
   auto command_var = rule_vars.find("command");
