@@ -183,6 +183,7 @@ struct Edge {
   HashResult hash;
   bool dirty = false;
   bool needed = false;
+  bool started = false;
 };
 
 struct Node {
@@ -1268,9 +1269,8 @@ void monitor_subprocesses(BuildState &state, Global &global) {
       Edge *e = cleaned_edges.front();
       cleaned_edges.pop_front();
       for (Node *output : e->outputs) {
-        std::set<Edge *> visited;
         for (Edge *out_edge : output->out_edges) {
-          if (!out_edge->dirty || !visited.insert(out_edge).second)
+          if (!out_edge->dirty || out_edge->started)
             continue;
           bool cleaned_all_deps = true;
           for (Node *input : out_edge->inputs) {
@@ -1280,6 +1280,7 @@ void monitor_subprocesses(BuildState &state, Global &global) {
             }
           }
           if (cleaned_all_deps) {
+            out_edge->started = true;
             compute_edge_dirty(out_edge);
             if (out_edge->dirty) {
               schedule_subprocess(state, out_edge);
