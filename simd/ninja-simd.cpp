@@ -40,6 +40,7 @@
 #include <sys/stat.h>
 
 #include "oneapi/tbb/concurrent_hash_map.h"
+#include "oneapi/tbb/concurrent_vector.h"
 #include "oneapi/tbb/parallel_for_each.h"
 #include "oneapi/tbb/task_group.h"
 
@@ -84,23 +85,28 @@ using namespace oneapi;
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wcomment"
 //
-//         /--- parse build log --------------------------------------------------------------------------------\
-//         |                                                /- parse subninja build statements (batch 1/2) ------\
-//         |                        /-- scan subninja file --- parse subninja build statements (batch 2/2) --------- identify build commands
-//  START ----- scan root manifest ---- parse root manifest build statements (batch 1/2) ------------------------/
-//                                  \-- parse root manifest build statements (batch 2/2) -----------------------/
+//         /--- parse build log --------------------------------------------------------------------------------------------\
+//         |                                                              /- parse subninja build statements (batch 1/2) ----\
+//         | /- scan root manifest (slice 1/2) -\ /-- scan subninja file --- parse subninja build statements (batch 2/2) ------- identify build commands
+//  START ----- scan root manifest (slice 2/2) ----- parse root manifest build statements (batch 1/2) -----------------------/
+//                                                \- parse root manifest build statements (batch 2/2) ----------------------/
 //
 #pragma GCC diagnostic pop
 // clang-format on
 //
-// In the "scan" phase (phase 1), we use SIMD instructions to rapidly search an
-// input file for top-level entities, such as build statements, rules and
-// subninja statements, parse certain top-level entities and compute hashes for
-// top-level entities that may be involved in the evaluation of a build
-// statement command. In the "parse" phase (phase 2), we parse build statements,
-// using SIMD for tokenization, and add them to a concurrent hash map that maps
-// from paths to node pointers. Batches of build statements identified in phase
-// 1 are processed in parallel, and so are any identified subninja files.
+// In the "scan" phase, we split the input file into chunks (minimum chunk size
+// 1MB, maximum 128 chunks), use SIMD instructions to rapidly search the input
+// file for top-level entities, such as build statements, rules and subninja
+// statements, parse top-level entities that may be parsed without context, such
+// as build statements whose inputs and outputs do not contain variable
+// references, and compute hashes for top-level entities that may be involved in
+// the evaluation of a build statement command. Build statements are parsed
+// using SIMD for tokenization, and we add them to a custom concurrent hash map
+// implementation that maps from paths to node pointers. In the "parse" phase,
+// we add variables to a hash map, and then parse build statements that contain
+// variable references as well as subninja files. Batches of build statements
+// identified during the "scan" phase are processed in parallel during the
+// "parse" phase, and so are any identified subninja files.
 //
 // In parallel with parsing build manifests, we also parse the build log. For
 // details, including an overview of the format, please see the comment at the
@@ -285,9 +291,14 @@ struct Scope {
   toplevel_vars_t vars;
   rules_t rule;
 };
-struct Phase1Scope {
-  std::vector<Rule> build;
-  std::vector<char *> subninja, default_;
+struct ScannedVar {
+  std::string_view name;
+  ToplevelVar value;
+};
+struct ScannedScope {
+  std::vector<Rule> build, rule;
+  std::vector<ScannedVar> var;
+  std::vector<char *> include, subninja, default_;
 };
 
 struct ExpansionScope {
@@ -662,28 +673,37 @@ template <unsigned Args> inline Var var_token(char *&pos) {
   return v;
 }
 
-void parse_file(Global &global, Scope &scope, Phase1Scope &scope1,
+using ScannedScopeVec = tbb::concurrent_vector<std::shared_ptr<ScannedScope>>;
+
+void parse_file(tbb::task_group &tg, Global &global, Scope &scope, ScannedScopeVec &scanned_scopes,
                 std::string_view path);
 
 vars_t parse_indented_vars(char *pos);
 
-void parse_file_range(Global &global, Scope &scope, Phase1Scope &scope1,
+void resolve_build(Global& global, Scope& scope, char* pos, HashResult hash,
+                   Node*& tmp_node);
+
+void parse_file_range(tbb::task_group &tg, Global &global, Scope &scope, ScannedScopeVec &scanned_scopes,
                       char *begin, char *end) {
+  auto scanned_scope = std::make_shared<ScannedScope>();
+  auto *tmp_node = new Node;
   char *pos = begin;
   bool cur_build = false;
-  std::string_view cur_rule;
+  bool cur_rule = false;
+  bool cur_build_simple;
   char *cur_toplevel;
   auto finish_toplevel = [&](char *pos) {
     if (cur_build) {
       HashResult hash = hash_buf(cur_toplevel, pos - cur_toplevel);
-      scope1.build.push_back({cur_toplevel, hash});
+      if (cur_build_simple)
+        resolve_build(global, scope, cur_toplevel, hash, tmp_node);
+      else
+        scanned_scope->build.push_back({cur_toplevel, hash});
       cur_build = false;
-    } else if (!cur_rule.empty()) {
+    } else if (cur_rule) {
       HashResult hash = hash_buf(cur_toplevel, pos - cur_toplevel);
-      auto &rule = scope.rule[cur_rule];
-      rule.begin = cur_toplevel;
-      rule.hash = hash;
-      cur_rule = "";
+      scanned_scope->rule.push_back({cur_toplevel, hash});
+      cur_rule = false;
     }
   };
   auto parse_toplevel = [&](char *&pos) -> bool {
@@ -693,10 +713,9 @@ void parse_file_range(Global &global, Scope &scope, Phase1Scope &scope1,
     if (word == "build") {
       cur_build = true;
       cur_toplevel = pos;
+      token<0>(pos, cur_build_simple);
     } else if (word == "rule") {
-      bool simple;
-      cur_rule =
-          token<EqualsIsToken | ColonIsToken | SpaceIsSeparator>(pos, simple);
+      cur_rule = true;
       cur_toplevel = pos;
     } else if (word == "pool") {
       decltype(global.pool)::accessor a;
@@ -706,12 +725,16 @@ void parse_file_range(Global &global, Scope &scope, Phase1Scope &scope1,
           token<EqualsIsToken | ColonIsToken | SpaceIsSeparator>(pos, simple));
       a->second = pos;
     } else if (word == "include") {
+      char *path_pos = pos;
       Var path = var_token<ColonIsToken | SpaceIsSeparator>(pos);
-      parse_file(global, scope, scope1, var_expansion(path, &scope));
+      if (path.simple)
+        parse_file(tg, global, scope, scanned_scopes, path.value);
+      else
+        scanned_scope->include.push_back(path_pos);
     } else if (word == "subninja")
-      scope1.subninja.push_back(pos);
+      scanned_scope->subninja.push_back(pos);
     else if (word == "default")
-      scope1.default_.push_back(pos);
+      scanned_scope->default_.push_back(pos);
     else {
       bool simple;
       std::string_view equals =
@@ -721,7 +744,7 @@ void parse_file_range(Global &global, Scope &scope, Phase1Scope &scope1,
       ToplevelVar v;
       static_cast<Var &>(v) = var_token<0>(pos);
       v.hash = hash_buf(v.value.data(), v.value.size());
-      scope.vars.insert({word, v});
+      scanned_scope->var.push_back({word, v});
     }
     return false;
   };
@@ -779,10 +802,12 @@ void parse_file_range(Global &global, Scope &scope, Phase1Scope &scope1,
     parse_toplevel(pos);
     move_to_next_toplevel();
   }
+  delete tmp_node;
+  scanned_scopes.push_back(std::move(scanned_scope));
 }
 
-void parse_file(Global &global, Scope &scope, Phase1Scope &scope1,
-                std::string_view path) {
+void parse_file(tbb::task_group& tg, Global& global, Scope& scope,
+                ScannedScopeVec& scanned_scopes, std::string_view path) {
   // The parser uses '\0' as an end-of-file marker. In the SIMD code paths, we
   // unconditionally read 16 bytes from an arbitrary position in the file.
   // This simplifies the SIMD code paths because it means that we don't also
@@ -810,7 +835,18 @@ void parse_file(Global &global, Scope &scope, Phase1Scope &scope1,
   close(fd);
   char *begin = (char *)addr;
   char *end = begin + size;
-  parse_file_range(global, scope, scope1, begin, end);
+  size_t chunk_size = std::max(size_t(1)<<20, (size / 128) + 1);
+  for (size_t chunk = 0; chunk <= size / chunk_size; ++chunk) {
+    char *chunk_begin = begin + chunk * chunk_size;
+    char *chunk_end = std::min(end, begin + (chunk + 1) * chunk_size);
+    if (chunk != 0)
+      while (*(chunk_begin - 1) != '\n')
+        chunk_begin++;
+    tg.run([&tg, &global, &scope, &scanned_scopes, chunk_begin, chunk_end]() {
+      parse_file_range(tg, global, scope, scanned_scopes, chunk_begin,
+                       chunk_end);
+    });
+  }
 }
 
 std::string_view canonicalize(std::string_view path, std::string &buf) {
@@ -841,64 +877,58 @@ std::string_view canonicalize(std::string_view path, std::string &buf) {
   return path;
 }
 
-void resolve_build(Global &global, Scope &scope, std::span<Rule> builds) {
-  // keep a node allocated so we don't have to allocate one while holding the
-  // lock
-  auto *tmp_node = new Node;
-  for (Rule &build : builds) {
-    char *pos = build.begin;
-    auto *e = new Edge;
-    e->scope = &scope;
-    e->hash = build.hash;
-    auto get_or_create_node = [&](Var v) {
-      if (v.simple) {
-        tmp_node->path = v.value;
-      } else {
-        append_expansion(tmp_node->path_buf, v.value, &scope);
-        tmp_node->path = tmp_node->path_buf;
-      }
-      tmp_node->path = canonicalize(tmp_node->path, tmp_node->path_buf);
-      return global.nodes.get_or_insert(tmp_node);
-    };
-    while (1) {
-      Var out = var_token<ColonIsToken | SpaceIsSeparator>(pos);
-      if (out.value == ":")
-        break;
-      if (out.value == "|") {
-        e->first_implicit_output = e->outputs.size();
-        continue;
-      }
-      Node *out_node = get_or_create_node(out);
-      out_node->in_edge = e;
-      e->outputs.push_back(out_node);
+void resolve_build(Global& global, Scope& scope, char* pos, HashResult hash,
+                   Node*& tmp_node) {
+  auto *e = new Edge;
+  e->scope = &scope;
+  e->hash = hash;
+  auto get_or_create_node = [&](Var v) {
+    if (v.simple) {
+      tmp_node->path = v.value;
+    } else {
+      append_expansion(tmp_node->path_buf, v.value, &scope);
+      tmp_node->path = tmp_node->path_buf;
     }
-    if (e->first_implicit_output == -1ul)
+    tmp_node->path = canonicalize(tmp_node->path, tmp_node->path_buf);
+    return global.nodes.get_or_insert(tmp_node);
+  };
+  while (1) {
+    Var out = var_token<ColonIsToken | SpaceIsSeparator>(pos);
+    if (out.value == ":")
+      break;
+    if (out.value == "|") {
       e->first_implicit_output = e->outputs.size();
-    bool simple;
-    std::string_view rule = token<ColonIsToken | SpaceIsSeparator>(pos, simple);
-    if (rule != "phony")
-      e->rule_name = rule;
-    while (1) {
-      Var in = var_token<ColonIsToken | SpaceIsSeparator>(pos);
-      if (in.value == "|") {
-        e->first_implicit_input = e->inputs.size();
-        continue;
-      }
-      if (in.value == "||") {
-        e->first_order_only_input = e->inputs.size();
-        continue;
-      }
-      if (in.value == "")
-        break;
-      e->inputs.push_back(get_or_create_node(in));
+      continue;
     }
-    if (e->first_order_only_input == -1ul)
-      e->first_order_only_input = e->inputs.size();
-    if (e->first_implicit_input == -1ul)
-      e->first_implicit_input = e->first_order_only_input;
-    e->vars = pos;
+    Node *out_node = get_or_create_node(out);
+    out_node->in_edge = e;
+    e->outputs.push_back(out_node);
   }
-  delete tmp_node;
+  if (e->first_implicit_output == -1ul)
+    e->first_implicit_output = e->outputs.size();
+  bool simple;
+  std::string_view rule = token<ColonIsToken | SpaceIsSeparator>(pos, simple);
+  if (rule != "phony")
+    e->rule_name = rule;
+  while (1) {
+    Var in = var_token<ColonIsToken | SpaceIsSeparator>(pos);
+    if (in.value == "|") {
+      e->first_implicit_input = e->inputs.size();
+      continue;
+    }
+    if (in.value == "||") {
+      e->first_order_only_input = e->inputs.size();
+      continue;
+    }
+    if (in.value == "")
+      break;
+    e->inputs.push_back(get_or_create_node(in));
+  }
+  if (e->first_order_only_input == -1ul)
+    e->first_order_only_input = e->inputs.size();
+  if (e->first_implicit_input == -1ul)
+    e->first_implicit_input = e->first_order_only_input;
+  e->vars = pos;
 }
 
 timespec now() {
@@ -931,24 +961,48 @@ void parse_scope(tbb::task_group &tg, Global &global, Scope *parent,
   auto *s = new Scope;
   s->parent = parent;
 
-  auto scope1 = std::make_shared<Phase1Scope>();
-  parse_file(global, *s, *scope1, path);
+  tbb::task_group scan_tg;
+  ScannedScopeVec scanned_scopes;
+  parse_file(scan_tg, global, *s, scanned_scopes, path);
+  scan_tg.wait();
 
-  for (char *inc : scope1->subninja) {
-    tg.run([&tg, &global, s, inc]() {
-      char *pos = inc;
-      Var path = var_token<ColonIsToken | SpaceIsSeparator>(pos);
-      parse_scope(tg, global, s, var_expansion(path, s));
-    });
+  for (auto &scanned_scope : scanned_scopes) {
+    for (ScannedVar &var : scanned_scope->var) {
+      s->vars[var.name] = var.value;
+    }
   }
-  constexpr size_t chunk_size = 1024;
-  for (size_t i = 0; i < scope1->build.size(); i += chunk_size) {
-    tg.run([&global, i, s, scope1]() {
-      resolve_build(global, *s,
-                    {scope1->build.begin() + i,
-                     std::min(scope1->build.begin() + i + chunk_size,
-                              scope1->build.end())});
-    });
+
+  for (auto &scanned_scope : scanned_scopes) {
+    if (!scanned_scope->include.empty())
+      error("FIXME: can't handle non-simple includes yet");
+    for (char *inc : scanned_scope->subninja) {
+      Var path_token = var_token<ColonIsToken | SpaceIsSeparator>(inc);
+      std::string path = var_expansion(path_token, s);
+      tg.run([&tg, &global, s, path]() { parse_scope(tg, global, s, path); });
+    }
+    constexpr size_t chunk_size = 1024;
+    for (size_t i = 0; i < scanned_scope->build.size(); i += chunk_size) {
+      tg.run([&global, i, s, scanned_scope]() {
+        Node* tmp_node = new Node;
+        for (Rule& rule : std::span<Rule>(
+                 scanned_scope->build.begin() + i,
+                 std::min(scanned_scope->build.begin() + i + chunk_size,
+                          scanned_scope->build.end()))) {
+          resolve_build(global, *s, rule.begin, rule.hash, tmp_node);
+        }
+        delete tmp_node;
+      });
+    }
+  }
+
+  for (auto &scanned_scope : scanned_scopes) {
+    for (Rule &rule : scanned_scope->rule) {
+      bool simple;
+      char *pos = rule.begin;
+      std::string_view name = 
+          token<EqualsIsToken | ColonIsToken | SpaceIsSeparator>(pos, simple);
+      s->rule[name] = { pos, rule.hash };
+    }
   }
 }
 
