@@ -64,14 +64,14 @@ using namespace oneapi;
 // significantly faster time-to-first-build-command than the existing
 // implementation. On the author's machine, an M2 Max Macbook Pro running Linux,
 // we can start executing build commands in Chromium's GN based build system
-// ("chrome" target) in 200ms while the existing Ninja implementation takes 3.5
+// ("chrome" target) in 100ms while the existing Ninja implementation takes 3.5
 // seconds. The null build time has not been measured for Chromium because it
 // doesn't build out of the box on Linux/arm64, but here are the null build
 // times for LLVM:
 //
 //                         Ninja  Ninja-SIMD
-// llvm-ar (CMake build)   175ms     42ms
-// clang (GN build)         70ms     18ms
+// llvm-ar (CMake build)   175ms     24ms
+// clang (GN build)         70ms     21ms
 //
 // FIXME: The implementation currently does not support the following:
 // - Architectures other than arm64 and x86_64.
