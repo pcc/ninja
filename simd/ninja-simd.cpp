@@ -737,7 +737,8 @@ void dbg(const char* format, ...) {
 }
 
 void parse_file_range(tbb::task_group& tg, Global& global, Scope& scope,
-                      ScannedScopeVec& scanned_scopes, char* begin, char* end) {
+                      ScannedScopeVec& scanned_scopes, char* begin, char* end,
+                      char* file_end) {
   auto scanned_scope = std::make_shared<ScannedScope>();
   auto* tmp_node = new Node;
   char* pos = begin;
@@ -807,7 +808,7 @@ void parse_file_range(tbb::task_group& tg, Global& global, Scope& scope,
     // We may need to keep track of whether the previous line is a comment.
     SIMDVec newlines = vec_dup('\n');
     auto identifier = first_all_ones_mask_identifier();
-    while (pos < end) {
+    while (pos < file_end) {
       SIMDVec chars_m1 = vec_load(pos - 1);
       SIMDVec mask = vec_eq(chars_m1, newlines);
       uint8_t first = first_all_ones(mask, identifier);
@@ -895,10 +896,11 @@ void parse_file(tbb::task_group& tg, Global& global, Scope& scope,
     if (chunk != 0)
       while (*(chunk_begin - 1) != '\n')
         chunk_begin++;
-    tg.run([&tg, &global, &scope, &scanned_scopes, chunk_begin, chunk_end]() {
-      parse_file_range(tg, global, scope, scanned_scopes, chunk_begin,
-                       chunk_end);
-    });
+    tg.run(
+        [&tg, &global, &scope, &scanned_scopes, chunk_begin, chunk_end, end]() {
+          parse_file_range(tg, global, scope, scanned_scopes, chunk_begin,
+                           chunk_end, end);
+        });
   }
 }
 
