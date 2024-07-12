@@ -51,8 +51,6 @@
 #elif defined(__x86_64__)
 #include <emmintrin.h>
 #include <xmmintrin.h>
-#else
-#error "Unsupported architecture"
 #endif
 
 #include "depfile_parser.h"
@@ -73,7 +71,6 @@ using namespace oneapi;
 // clang (GN build)         70ms     21ms
 //
 // FIXME: The implementation currently does not support the following:
-// - Architectures other than arm64 and x86_64.
 // - Non-POSIX operating systems (only tested on Linux).
 // - Generator rules, pools, dyndeps, and likely several other features and
 //   parsing corner cases that GN/CMake/Meson do not use (at least for C++).
@@ -530,6 +527,37 @@ static uint8_t first_all_ones(SIMDVec v, NoMaskIdentifier mask_identifier) {
 static bool has_all_ones(SIMDVec v) {
   return _mm_movemask_epi8(v);
 }
+#else
+using SIMDVec = uint8_t;
+
+static SIMDVec vec_load(char* c) {
+  return *c;
+}
+
+static SIMDVec vec_dup(uint8_t c) {
+  return c;
+}
+
+static SIMDVec vec_eq(SIMDVec v1, SIMDVec v2) {
+  return v1 == v2;
+}
+
+static SIMDVec vec_or(SIMDVec v1, SIMDVec v2) {
+  return v1 | v2;
+}
+
+struct NoMaskIdentifier {};
+static NoMaskIdentifier first_all_ones_mask_identifier() {
+  return NoMaskIdentifier();
+}
+
+static uint8_t first_all_ones(SIMDVec v, NoMaskIdentifier mask_identifier) {
+  return v ? 0 : 1;
+}
+
+static bool has_all_ones(SIMDVec v) {
+  return v;
+}
 #endif
 
 // Consume a token and its following whitespace. Returns the token (without
@@ -628,8 +656,8 @@ inline std::string_view token(char*& pos, bool& simple) {
         mask = vec_or(mask, space_mask);
       mask = vec_or(mask, zero_mask);
       uint8_t first = first_all_ones(mask, identifier);
-      if (__builtin_expect(first == 16, 1)) {
-        pos += 16;
+      if (__builtin_expect(first == sizeof(SIMDVec), 1)) {
+        pos += sizeof(SIMDVec);
         acc_dollar_mask = vec_or(acc_dollar_mask, dollar_mask);
         continue;
       }
@@ -758,8 +786,8 @@ void parse_file_range(tbb::task_group& tg, Global& global, Scope& scope,
       SIMDVec chars_m1 = vec_load(pos - 1);
       SIMDVec mask = vec_eq(chars_m1, newlines);
       uint8_t first = first_all_ones(mask, identifier);
-      if (__builtin_expect(first == 16, 1)) {
-        pos += 16;
+      if (__builtin_expect(first == sizeof(SIMDVec), 1)) {
+        pos += sizeof(SIMDVec);
         continue;
       }
       pos += first;
@@ -821,7 +849,7 @@ void parse_file(tbb::task_group& tg, Global& global, Scope& scope,
 
   static size_t page_size = sysconf(_SC_PAGESIZE);
   void* addr;
-  if (size % page_size > page_size - 16) {
+  if (size % page_size > page_size - sizeof(SIMDVec)) {
     void* nulls_addr =
         mmap(0, size + page_size, PROT_READ, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (nulls_addr == MAP_FAILED)
