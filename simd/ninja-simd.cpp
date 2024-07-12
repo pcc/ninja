@@ -22,7 +22,6 @@
 #include <optional>
 #include <poll.h>
 #include <regex>
-#include <set>
 #include <span>
 #include <spawn.h>
 #include <stdarg.h>
