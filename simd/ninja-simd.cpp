@@ -711,6 +711,31 @@ vars_t parse_indented_vars(char* pos);
 void resolve_build(Global& global, Scope& scope, char* pos, HashResult hash,
                    Node*& tmp_node);
 
+timespec now() {
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts;
+}
+
+timespec prog_begin = now();
+
+void print_difference(timespec a, timespec b) {
+  uint64_t a64 = a.tv_sec * 1000000000 + a.tv_nsec;
+  uint64_t b64 = b.tv_sec * 1000000000 + b.tv_nsec;
+  fprintf(stderr, "[%lu.%06lu] ", (a64 - b64) / 1000000000,
+          ((a64 - b64) % 1000000000) / 1000);
+}
+
+void dbg(const char* format, ...) {
+  static bool debug_enabled = getenv("POM_DEBUG");
+  if (!debug_enabled)
+    return;
+  print_difference(now(), prog_begin);
+  va_list ap;
+  va_start(ap, format);
+  vfprintf(stderr, format, ap);
+}
+
 void parse_file_range(tbb::task_group& tg, Global& global, Scope& scope,
                       ScannedScopeVec& scanned_scopes, char* begin, char* end) {
   auto scanned_scope = std::make_shared<ScannedScope>();
@@ -957,31 +982,6 @@ void resolve_build(Global& global, Scope& scope, char* pos, HashResult hash,
   if (e->first_implicit_input == -1ul)
     e->first_implicit_input = e->first_order_only_input;
   e->vars = pos;
-}
-
-timespec now() {
-  timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts;
-}
-
-timespec prog_begin = now();
-
-void print_difference(timespec a, timespec b) {
-  uint64_t a64 = a.tv_sec * 1000000000 + a.tv_nsec;
-  uint64_t b64 = b.tv_sec * 1000000000 + b.tv_nsec;
-  fprintf(stderr, "[%lu.%06lu] ", (a64 - b64) / 1000000000,
-          ((a64 - b64) % 1000000000) / 1000);
-}
-
-void dbg(const char* format, ...) {
-  static bool debug_enabled = getenv("POM_DEBUG");
-  if (!debug_enabled)
-    return;
-  print_difference(now(), prog_begin);
-  va_list ap;
-  va_start(ap, format);
-  vfprintf(stderr, format, ap);
 }
 
 void parse_scope(tbb::task_group& tg, Global& global, Scope* parent,
