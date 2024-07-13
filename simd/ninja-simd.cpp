@@ -61,7 +61,7 @@ using namespace oneapi;
 // significantly faster time-to-first-build-command than the existing
 // implementation. On the author's machine, an M2 Max Macbook Pro running Linux,
 // we can start executing build commands in Chromium's GN based build system
-// ("chrome" target) in 100ms while the existing Ninja implementation takes 3.5
+// ("chrome" target) in 85ms while the existing Ninja implementation takes 3.5
 // seconds. The null build time has not been measured for Chromium because it
 // doesn't build out of the box on Linux/arm64, but here are the null build
 // times for LLVM:
@@ -93,16 +93,15 @@ using namespace oneapi;
 // In the "scan" phase, we split the input file into chunks (minimum chunk size
 // 1MB, maximum 128 chunks), use SIMD instructions to rapidly search the input
 // file for top-level entities, such as build statements, rules and subninja
-// statements, parse top-level entities that may be parsed without context, such
-// as build statements whose inputs and outputs do not contain variable
-// references, and compute hashes for top-level entities that may be involved in
-// the evaluation of a build statement command. Build statements are parsed
-// using SIMD for tokenization, and we add them to a custom concurrent hash map
-// implementation that maps from paths to node pointers. In the "parse" phase,
-// we add variables to a hash map, and then parse build statements that contain
-// variable references as well as subninja files. Batches of build statements
-// identified during the "scan" phase are processed in parallel during the
-// "parse" phase, and so are any identified subninja files.
+// statements, parse certain top-level entities, and compute hashes for
+// top-level entities that may be involved in the evaluation of a build
+// statement command. In the "parse" phase, we add variables to a hash map, and
+// then parse build statements as well as subninja files. Batches of build
+// statements identified during the "scan" phase are processed in parallel
+// during the "parse" phase, and so are any identified subninja files. Build
+// statements are parsed using SIMD for tokenization, and we add them to a
+// custom concurrent hash map implementation that maps from paths to node
+// pointers.
 //
 // In parallel with parsing build manifests, we also parse the build log. For
 // details, including an overview of the format, please see the comment at the
@@ -744,15 +743,11 @@ void parse_file_range(tbb::task_group& tg, Global& global, Scope& scope,
   char* pos = begin;
   bool cur_build = false;
   bool cur_rule = false;
-  bool cur_build_simple;
   char* cur_toplevel;
   auto finish_toplevel = [&](char* pos) {
     if (cur_build) {
       HashResult hash = hash_buf(cur_toplevel, pos - cur_toplevel);
-      if (cur_build_simple)
-        resolve_build(global, scope, cur_toplevel, hash, tmp_node);
-      else
-        scanned_scope->build.push_back({ cur_toplevel, hash });
+      scanned_scope->build.push_back({ cur_toplevel, hash });
       cur_build = false;
     } else if (cur_rule) {
       HashResult hash = hash_buf(cur_toplevel, pos - cur_toplevel);
@@ -767,7 +762,6 @@ void parse_file_range(tbb::task_group& tg, Global& global, Scope& scope,
     if (word == "build") {
       cur_build = true;
       cur_toplevel = pos;
-      token<0>(pos, cur_build_simple);
     } else if (word == "rule") {
       cur_rule = true;
       cur_toplevel = pos;
