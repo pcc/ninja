@@ -453,7 +453,7 @@ static bool is_unescaped_dollar(char* begin, char* pos) {
   return num_dollars % 2 == 1;
 }
 
-#ifdef __aarch64__
+#if defined(__aarch64__) && !defined(__AARCH64EB__)
 using SIMDVec = uint8x16_t;
 
 static SIMDVec vec_load(char* c) {
@@ -472,21 +472,14 @@ static SIMDVec vec_or(SIMDVec v1, SIMDVec v2) {
   return vorrq_u8(v1, v2);
 }
 
-// Returns a vector that may be ANDed with a vector of comparison results which
-// may then be used as an input to UMAXV (max of all vector elements) to
-// identify the first all-ones element. The max will be 0 in case of no matches,
-// 16 if the first match was the first element, 15 if it's the second
-// element, etc. It's noinline because GCC wants to move a load of this vector
-// into the middle of our tight loops otherwise.
-__attribute__((noinline)) SIMDVec first_all_ones_mask_identifier() {
-  SIMDVec identifier = {
-    16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1
-  };
-  return identifier;
-}
-
-static uint8_t first_all_ones(SIMDVec v, SIMDVec mask_identifier) {
-  return 16 - vmaxvq_u8(vandq_u8(v, mask_identifier));
+static uint8_t first_all_ones(SIMDVec v) {
+  // Reinterpret a vector of 16 8-bit masks as a vector of 8 16-bit mask pairs,
+  // shift each element right by 4 and truncate each element to 8 bits. This
+  // effectively transforms a vector of 8-bit masks into a vector of 4-bit
+  // masks. For example, the mask pair 1111111100000000 becomes 11110000.
+  uint64_t mask = vget_lane_u64(
+      vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(v), 4)), 0);
+  return mask ? __builtin_ctzl(mask) / 4 : 16;
 }
 
 static bool has_all_ones(SIMDVec v) {
@@ -511,14 +504,7 @@ static SIMDVec vec_or(SIMDVec v1, SIMDVec v2) {
   return _mm_or_si128(v1, v2);
 }
 
-// The mask identifier is not needed on x86, but we return an empty struct so
-// that the client code can stay the same.
-struct NoMaskIdentifier {};
-static NoMaskIdentifier first_all_ones_mask_identifier() {
-  return NoMaskIdentifier();
-}
-
-static uint8_t first_all_ones(SIMDVec v, NoMaskIdentifier mask_identifier) {
+static uint8_t first_all_ones(SIMDVec v) {
   uint16_t mask = _mm_movemask_epi8(v);
   return __builtin_ctz(0x10000 | mask);
 }
@@ -545,12 +531,7 @@ static SIMDVec vec_or(SIMDVec v1, SIMDVec v2) {
   return v1 | v2;
 }
 
-struct NoMaskIdentifier {};
-static NoMaskIdentifier first_all_ones_mask_identifier() {
-  return NoMaskIdentifier();
-}
-
-static uint8_t first_all_ones(SIMDVec v, NoMaskIdentifier mask_identifier) {
+static uint8_t first_all_ones(SIMDVec v) {
   return v ? 0 : 1;
 }
 
@@ -602,15 +583,11 @@ inline std::string_view token(char*& pos, bool& simple) {
     //
     // We can see that we've identified the first ' ', which is the first 1 in
     // the vector. We call this the potential token terminating character
-    // (PTTC). Now we need to locate it. We can do that by ANDing the register
-    // with the magic "first_all_ones_mask_identifier" vector. In the example,
-    // this will produce the following result:
-    //   {0, 0, 0, 13, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0}
-    // Now we use the UMAXV instruction to take the maximum of all elements of
-    // the vector, which is 13. Subtracting 16 from that gives us our byte
-    // position of 3. Note that we also identified the second ' ' but we ignore
-    // it for now and handle it during the next iteration. If the maximum was 0
-    // it means there was no PTTC and we move to the next 16 characters.
+    // (PTTC). Now we need to locate it. We can do that in an
+    // architecture-specific way (see first_all_ones()). Note that we also
+    // identified the second ' ' but we ignore it for now and handle it during
+    // the next iteration. If the maximum was 0 it means there was no PTTC and
+    // we move to the next 16 characters.
     //
     // We then need to determine whether the PTTC is escaped, which means that
     // it does not terminate the token. We do that by checking whether it is
@@ -637,7 +614,6 @@ inline std::string_view token(char*& pos, bool& simple) {
     SIMDVec newlines = vec_dup('\n');
     SIMDVec zeroes = vec_dup('\0');
     SIMDVec acc_dollar_mask = zeroes;
-    auto identifier = first_all_ones_mask_identifier();
     while (1) {
       SIMDVec chars = vec_load(pos);
       SIMDVec dollar_mask = vec_eq(chars, dollars);
@@ -654,13 +630,13 @@ inline std::string_view token(char*& pos, bool& simple) {
       if (Args & SpaceIsSeparator)
         mask = vec_or(mask, space_mask);
       mask = vec_or(mask, zero_mask);
-      uint8_t first = first_all_ones(mask, identifier);
+      uint8_t first = first_all_ones(mask);
       if (__builtin_expect(first == sizeof(SIMDVec), 1)) {
         pos += sizeof(SIMDVec);
         acc_dollar_mask = vec_or(acc_dollar_mask, dollar_mask);
         continue;
       }
-      uint8_t dollar_first = first_all_ones(dollar_mask, identifier);
+      uint8_t dollar_first = first_all_ones(dollar_mask);
       simple &= dollar_first > first;
       pos += first;
       if (*pos && is_unescaped_dollar(begin, pos - 1)) {
@@ -801,11 +777,10 @@ void parse_file_range(tbb::task_group& tg, Global& global, Scope& scope,
     // "$" at the end of a comment does not count as a continuation character.
     // We may need to keep track of whether the previous line is a comment.
     SIMDVec newlines = vec_dup('\n');
-    auto identifier = first_all_ones_mask_identifier();
     while (pos < file_end) {
       SIMDVec chars_m1 = vec_load(pos - 1);
       SIMDVec mask = vec_eq(chars_m1, newlines);
-      uint8_t first = first_all_ones(mask, identifier);
+      uint8_t first = first_all_ones(mask);
       if (__builtin_expect(first == sizeof(SIMDVec), 1)) {
         pos += sizeof(SIMDVec);
         continue;
