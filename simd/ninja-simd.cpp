@@ -61,7 +61,7 @@ using namespace oneapi;
 // significantly faster time-to-first-build-command than the existing
 // implementation. On the author's machine, an M2 Max Macbook Pro running Linux,
 // we can start executing build commands in Chromium's GN based build system
-// ("chrome" target) in 85ms while the existing Ninja implementation takes 3.5
+// ("chrome" target) in 80ms while the existing Ninja implementation takes 3.5
 // seconds. The null build time has not been measured for Chromium because it
 // doesn't build out of the box on Linux/arm64, but here are the null build
 // times for LLVM:
@@ -979,19 +979,12 @@ void parse_scope(tbb::task_group& tg, Global& global, Scope* parent,
       std::string path = var_expansion(path_token, s);
       tg.run([&tg, &global, s, path]() { parse_scope(tg, global, s, path); });
     }
-    constexpr size_t chunk_size = 1024;
-    for (size_t i = 0; i < scanned_scope->build.size(); i += chunk_size) {
-      tg.run([&global, i, s, scanned_scope]() {
-        Node* tmp_node = new Node;
-        for (Rule& rule : std::span<Rule>(
-                 scanned_scope->build.begin() + i,
-                 std::min(scanned_scope->build.begin() + i + chunk_size,
-                          scanned_scope->build.end()))) {
-          resolve_build(global, *s, rule.begin, rule.hash, tmp_node);
-        }
-        delete tmp_node;
-      });
-    }
+    tg.run([&global, s, scanned_scope]() {
+      Node* tmp_node = new Node;
+      for (Rule& rule : scanned_scope->build)
+        resolve_build(global, *s, rule.begin, rule.hash, tmp_node);
+      delete tmp_node;
+    });
   }
 
   for (auto& scanned_scope : scanned_scopes) {
