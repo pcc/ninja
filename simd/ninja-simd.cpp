@@ -67,8 +67,8 @@ using namespace oneapi;
 // times for LLVM:
 //
 //                         Ninja  Ninja-SIMD
-// llvm-ar (CMake build)   175ms     24ms
-// clang (GN build)         70ms     21ms
+// llvm-ar (CMake build)   175ms     18ms
+// clang (GN build)         70ms     19ms
 //
 // FIXME: The implementation currently does not support the following:
 // - Non-POSIX operating systems (only tested on Linux).
@@ -189,7 +189,9 @@ struct Edge {
     return std::span<Node*>(inputs).subspan(0, first_order_only_input);
   }
   std::string_view rule_name;
+  char* begin;
   char* vars;
+  char* end;
   HashResult hash;
   bool dirty = false;
   bool needed = false;
@@ -313,6 +315,27 @@ void error(const char* err) {
 void append_expansion(std::string& buf, std::string_view token,
                       ExpansionScope es, size_t recursion_depth = 0);
 
+std::string_view read_var_name(char*& pos, char* end) {
+  if (*pos == '{') {
+    char* name_begin = pos + 1;
+    char* name_end = name_begin;
+    while (name_end != end && *name_end != '}')
+      name_end++;
+    pos = name_end + 1;
+    return std::string_view(name_begin, name_end);
+  } else {
+    char* name_begin = pos;
+    char* name_end = name_begin;
+    while (name_end != end &&
+           ((*name_end >= '0' && *name_end <= '9') ||
+            (*name_end >= 'A' && *name_end <= 'Z') ||
+            (*name_end >= 'a' && *name_end <= 'z') || *name_end == '_'))
+      name_end++;
+    pos = name_end;
+    return std::string_view(name_begin, name_end);
+  }
+}
+
 void append_var_expansion(std::string& buf, Var& v, ExpansionScope es,
                           size_t recursion_depth = 0) {
   if (v.simple)
@@ -411,27 +434,10 @@ void append_expansion(std::string& buf, std::string_view token,
       while (i != token.size() && token[i] == ' ')
         ++i;
     } else {
-      std::string_view name;
-      if (token[i + 1] == '{') {
-        size_t name_begin = i + 2;
-        size_t name_end = name_begin;
-        while (name_end != token.size() && token[name_end] != '}')
-          name_end++;
-        name = token.substr(name_begin, name_end - name_begin);
-        i = name_end + 1;
-      } else {
-        size_t name_begin = i + 1;
-        size_t name_end = name_begin;
-        while (name_end != token.size() &&
-               ((token[name_end] >= '0' && token[name_end] <= '9') ||
-                (token[name_end] >= 'A' && token[name_end] <= 'Z') ||
-                (token[name_end] >= 'a' && token[name_end] <= 'z') ||
-                token[name_end] == '_'))
-          name_end++;
-        name = token.substr(name_begin, name_end - name_begin);
-        i = name_end;
-      }
+      char* pos = (char*)&token[i + 1];
+      std::string_view name = read_var_name(pos, (char*)token.end());
       append_named_var_expansion(buf, name, es, recursion_depth);
+      i = pos - token.begin();
     }
   }
 }
@@ -904,11 +910,13 @@ std::string_view canonicalize(std::string_view path, std::string& buf) {
   return path;
 }
 
-void resolve_build(Global& global, Scope& scope, char* pos, HashResult hash,
-                   Node*& tmp_node) {
+void resolve_build(Global& global, Scope& scope, Rule& build, Node*& tmp_node) {
+  char* pos = build.begin;
   auto* e = new Edge;
+  e->begin = build.begin;
   e->scope = &scope;
-  e->hash = hash;
+  e->hash = build.hash;
+  e->end = build.end;
   auto get_or_create_node = [&](Var v) {
     if (v.simple) {
       tmp_node->path = v.value;
@@ -985,7 +993,7 @@ void parse_scope(tbb::task_group& tg, Global& global, Scope* parent,
     tg.run([&global, s, scanned_file_range]() {
       Node* tmp_node = new Node;
       for (Rule& rule : scanned_file_range->build)
-        resolve_build(global, *s, rule.begin, rule.hash, tmp_node);
+        resolve_build(global, *s, rule, tmp_node);
       delete tmp_node;
     });
   }
@@ -1231,9 +1239,9 @@ void compute_edge_dirty(Edge* e) {
 //       a node manifest can always be distinguished from a node introducer.
 //    b. A 4-byte node slot number.
 //    c. A 16-byte XXH128 hash that combines the hashes of the text of the build
-//       statement, the rule, and (TODO) the referenced variables, the
-//       mtimes of the input and output files and the mtimes of the filenames
-//       read from the depfile.
+//       statement, the rule, and the referenced variables, the mtimes of the
+//       input and output files and the mtimes of the filenames read from the
+//       depfile.
 //    d. A list of slot numbers for the filenames read from the depfile.
 //
 // Filling in the node data from the build log turns out to be expensive enough
@@ -1509,10 +1517,40 @@ std::optional<HashResult> compute_edge_hash(Edge* e) {
   for (Node* n : e->outputs)
     if (add_node(n))
       return std::nullopt;
+  std::function<void(Scope*, char*, char*)> add_var_expansions;
+  add_var_expansions = [&](Scope* s, char* begin, char* end) {
+    SIMDVec dollars = vec_dup('$');
+    char* pos = begin;
+    while (pos < end) {
+      SIMDVec chars = vec_load(pos);
+      SIMDVec mask = vec_eq(chars, dollars);
+      uint8_t first_dollar = first_all_ones(mask);
+      if (first_dollar == sizeof(SIMDVec)) {
+        pos += sizeof(SIMDVec);
+        continue;
+      }
+      pos += first_dollar + 1;
+      if (pos >= end)
+        return;
+      std::string_view name = read_var_name(pos, end);
+      for (Scope* scope = s; scope; scope = scope->parent) {
+        auto i = scope->vars.find(name);
+        if (i != scope->vars.end()) {
+          merkle.push_back(i->second.hash.lo);
+          merkle.push_back(i->second.hash.hi);
+          if (!i->second.simple)
+            add_var_expansions(scope, (char*)i->second.value.begin(),
+                               (char*)i->second.value.end());
+          break;
+        }
+      }
+    }
+  };
   std::function<bool(Edge*)> add_inputs;
   add_inputs = [&](Edge* e) {
     merkle.push_back(e->hash.lo);
     merkle.push_back(e->hash.hi);
+    add_var_expansions(e->scope, e->begin, e->end);
     for (Node* n : e->non_order_only_inputs()) {
       if (n->in_edge && n->in_edge->rule_name.empty()) {
         if (add_inputs(n->in_edge))
@@ -1533,6 +1571,7 @@ std::optional<HashResult> compute_edge_hash(Edge* e) {
   Rule* rule = find_rule(e);
   merkle.push_back(rule->hash.lo);
   merkle.push_back(rule->hash.hi);
+  add_var_expansions(e->scope, rule->begin, rule->end);
   return hash_buf(merkle.data(), 8 * merkle.size());
 }
 
