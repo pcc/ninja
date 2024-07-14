@@ -153,6 +153,7 @@ HashResult hash_buf(const void* buf, size_t size) {
 
 struct Rule {
   char* begin;
+  char* end;
   HashResult hash;
 };
 
@@ -724,11 +725,11 @@ void scan_file_range(tbb::task_group& tg, Global& global, Scope& scope,
   auto finish_toplevel = [&](char* pos) {
     if (cur_build) {
       HashResult hash = hash_buf(cur_toplevel, pos - cur_toplevel);
-      scanned_file_range->build.push_back({ cur_toplevel, hash });
+      scanned_file_range->build.push_back({ cur_toplevel, pos, hash });
       cur_build = false;
     } else if (cur_rule) {
       HashResult hash = hash_buf(cur_toplevel, pos - cur_toplevel);
-      scanned_file_range->rule.push_back({ cur_toplevel, hash });
+      scanned_file_range->rule.push_back({ cur_toplevel, pos, hash });
       cur_rule = false;
     }
   };
@@ -995,7 +996,7 @@ void parse_scope(tbb::task_group& tg, Global& global, Scope* parent,
       char* pos = rule.begin;
       std::string_view name =
           token<EqualsIsToken | ColonIsToken | SpaceIsSeparator>(pos, simple);
-      s->rule[name] = { pos, rule.hash };
+      s->rule[name] = { pos, rule.end, rule.hash };
     }
   }
 }
