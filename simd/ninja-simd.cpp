@@ -204,6 +204,7 @@ struct Node {
   std::string path_buf;
   std::vector<Edge*> out_edges;
   Edge* in_edge = nullptr;
+  bool allow_missing = false;
   bool nonexistent = false;
   std::atomic<bool> statted = false;
   struct timespec mtime;
@@ -936,7 +937,6 @@ void resolve_build(Global& global, Scope& scope, Rule& build, Node*& tmp_node) {
       continue;
     }
     Node* out_node = get_or_create_node(out);
-    out_node->in_edge = e;
     e->outputs.push_back(out_node);
   }
   if (e->first_implicit_output == -1ul)
@@ -964,6 +964,13 @@ void resolve_build(Global& global, Scope& scope, Rule& build, Node*& tmp_node) {
   if (e->first_implicit_input == -1ul)
     e->first_implicit_input = e->first_order_only_input;
   e->vars = pos;
+  if (e->rule_name.empty() && e->inputs.empty()) {
+    for (Node *out : e->outputs)
+      out->allow_missing = true;
+  } else {
+    for (Node *out : e->outputs)
+      out->in_edge = e;
+  }
 }
 
 void parse_scope(tbb::task_group& tg, Global& global, Scope* parent,
@@ -1572,7 +1579,7 @@ std::optional<HashResult> compute_edge_hash(Edge* e) {
         if (add_inputs(n->in_edge))
           return true;
       } else if (add_node(n)) {
-        if (!n->in_edge)
+        if (!n->in_edge && !n->allow_missing)
           error("missing input file");
         return true;
       }
