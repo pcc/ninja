@@ -290,7 +290,7 @@ struct ScannedVar {
   std::string_view name;
   ToplevelVar value;
 };
-struct ScannedScope {
+struct ScannedFileRange {
   std::vector<Rule> build, rule;
   std::vector<ScannedVar> var;
   std::vector<char*> include, subninja, default_;
@@ -676,10 +676,11 @@ inline Var var_token(char*& pos) {
   return v;
 }
 
-using ScannedScopeVec = tbb::concurrent_vector<std::shared_ptr<ScannedScope>>;
+using ScannedFileRangeVec =
+    tbb::concurrent_vector<std::shared_ptr<ScannedFileRange>>;
 
-void parse_file(tbb::task_group& tg, Global& global, Scope& scope,
-                ScannedScopeVec& scanned_scopes, std::string_view path);
+void scan_file(tbb::task_group& tg, Global& global, Scope& scope,
+               ScannedFileRangeVec& scanned_file_ranges, std::string_view path);
 
 vars_t parse_indented_vars(char* pos);
 
@@ -711,10 +712,10 @@ void dbg(const char* format, ...) {
   vfprintf(stderr, format, ap);
 }
 
-void parse_file_range(tbb::task_group& tg, Global& global, Scope& scope,
-                      ScannedScopeVec& scanned_scopes, char* begin, char* end,
-                      char* file_end) {
-  auto scanned_scope = std::make_shared<ScannedScope>();
+void scan_file_range(tbb::task_group& tg, Global& global, Scope& scope,
+                     ScannedFileRangeVec& scanned_file_ranges, char* begin,
+                     char* end, char* file_end) {
+  auto scanned_file_range = std::make_shared<ScannedFileRange>();
   auto* tmp_node = new Node;
   char* pos = begin;
   bool cur_build = false;
@@ -723,11 +724,11 @@ void parse_file_range(tbb::task_group& tg, Global& global, Scope& scope,
   auto finish_toplevel = [&](char* pos) {
     if (cur_build) {
       HashResult hash = hash_buf(cur_toplevel, pos - cur_toplevel);
-      scanned_scope->build.push_back({ cur_toplevel, hash });
+      scanned_file_range->build.push_back({ cur_toplevel, hash });
       cur_build = false;
     } else if (cur_rule) {
       HashResult hash = hash_buf(cur_toplevel, pos - cur_toplevel);
-      scanned_scope->rule.push_back({ cur_toplevel, hash });
+      scanned_file_range->rule.push_back({ cur_toplevel, hash });
       cur_rule = false;
     }
   };
@@ -752,13 +753,13 @@ void parse_file_range(tbb::task_group& tg, Global& global, Scope& scope,
       char* path_pos = pos;
       Var path = var_token<ColonIsToken | SpaceIsSeparator>(pos);
       if (path.simple)
-        parse_file(tg, global, scope, scanned_scopes, path.value);
+        scan_file(tg, global, scope, scanned_file_ranges, path.value);
       else
-        scanned_scope->include.push_back(path_pos);
+        scanned_file_range->include.push_back(path_pos);
     } else if (word == "subninja")
-      scanned_scope->subninja.push_back(pos);
+      scanned_file_range->subninja.push_back(pos);
     else if (word == "default")
-      scanned_scope->default_.push_back(pos);
+      scanned_file_range->default_.push_back(pos);
     else {
       bool simple;
       std::string_view equals =
@@ -768,7 +769,7 @@ void parse_file_range(tbb::task_group& tg, Global& global, Scope& scope,
       ToplevelVar v;
       static_cast<Var&>(v) = var_token<0>(pos);
       v.hash = hash_buf(v.value.data(), v.value.size());
-      scanned_scope->var.push_back({ word, v });
+      scanned_file_range->var.push_back({ word, v });
     }
     return false;
   };
@@ -826,11 +827,12 @@ void parse_file_range(tbb::task_group& tg, Global& global, Scope& scope,
     move_to_next_toplevel();
   }
   delete tmp_node;
-  scanned_scopes.push_back(std::move(scanned_scope));
+  scanned_file_ranges.push_back(std::move(scanned_file_range));
 }
 
-void parse_file(tbb::task_group& tg, Global& global, Scope& scope,
-                ScannedScopeVec& scanned_scopes, std::string_view path) {
+void scan_file(tbb::task_group& tg, Global& global, Scope& scope,
+               ScannedFileRangeVec& scanned_file_ranges,
+               std::string_view path) {
   // The parser uses '\0' as an end-of-file marker. In the SIMD code paths, we
   // unconditionally read 16 bytes from an arbitrary position in the file.
   // This simplifies the SIMD code paths because it means that we don't also
@@ -865,11 +867,11 @@ void parse_file(tbb::task_group& tg, Global& global, Scope& scope,
     if (chunk != 0)
       while (*(chunk_begin - 1) != '\n')
         chunk_begin++;
-    tg.run(
-        [&tg, &global, &scope, &scanned_scopes, chunk_begin, chunk_end, end]() {
-          parse_file_range(tg, global, scope, scanned_scopes, chunk_begin,
-                           chunk_end, end);
-        });
+    tg.run([&tg, &global, &scope, &scanned_file_ranges, chunk_begin, chunk_end,
+            end]() {
+      scan_file_range(tg, global, scope, scanned_file_ranges, chunk_begin,
+                      chunk_end, end);
+    });
   }
 }
 
@@ -961,34 +963,34 @@ void parse_scope(tbb::task_group& tg, Global& global, Scope* parent,
   s->parent = parent;
 
   tbb::task_group scan_tg;
-  ScannedScopeVec scanned_scopes;
-  parse_file(scan_tg, global, *s, scanned_scopes, path);
+  ScannedFileRangeVec scanned_file_ranges;
+  scan_file(scan_tg, global, *s, scanned_file_ranges, path);
   scan_tg.wait();
 
-  for (auto& scanned_scope : scanned_scopes) {
-    for (ScannedVar& var : scanned_scope->var) {
+  for (auto& scanned_file_range : scanned_file_ranges) {
+    for (ScannedVar& var : scanned_file_range->var) {
       s->vars[var.name] = var.value;
     }
   }
 
-  for (auto& scanned_scope : scanned_scopes) {
-    if (!scanned_scope->include.empty())
+  for (auto& scanned_file_range : scanned_file_ranges) {
+    if (!scanned_file_range->include.empty())
       error("FIXME: can't handle non-simple includes yet");
-    for (char* inc : scanned_scope->subninja) {
+    for (char* inc : scanned_file_range->subninja) {
       Var path_token = var_token<ColonIsToken | SpaceIsSeparator>(inc);
       std::string path = var_expansion(path_token, s);
       tg.run([&tg, &global, s, path]() { parse_scope(tg, global, s, path); });
     }
-    tg.run([&global, s, scanned_scope]() {
+    tg.run([&global, s, scanned_file_range]() {
       Node* tmp_node = new Node;
-      for (Rule& rule : scanned_scope->build)
+      for (Rule& rule : scanned_file_range->build)
         resolve_build(global, *s, rule.begin, rule.hash, tmp_node);
       delete tmp_node;
     });
   }
 
-  for (auto& scanned_scope : scanned_scopes) {
-    for (Rule& rule : scanned_scope->rule) {
+  for (auto& scanned_file_range : scanned_file_ranges) {
+    for (Rule& rule : scanned_file_range->rule) {
       bool simple;
       char* pos = rule.begin;
       std::string_view name =
