@@ -1480,11 +1480,27 @@ void monitor_subprocesses(BuildState& state, Global& global) {
   puts("");
 }
 
+vars_t parse_indented_vars(char* pos);
+
 std::optional<HashResult> compute_edge_hash(Edge* e) {
   // Skip phony edges. These are handled recursively when computing the Merkle
   // tree for the referents (see add_inputs below).
   if (e->rule_name.empty())
     return std::nullopt;
+
+  Rule* rule = find_rule(e);
+  vars_t rule_vars = parse_indented_vars(rule->begin);
+  vars_t build_vars = parse_indented_vars(e->vars);
+
+  ExpansionScope es(e->scope);
+  es.build_edge = e;
+  es.rule_vars = &rule_vars;
+  es.build_vars = &build_vars;
+
+  std::string generator;
+  append_named_var_expansion(generator, "generator", es, 0);
+  if (!generator.empty())
+    abort();
   std::vector<uint64_t> merkle;
   auto stat_node = [](Node* n) {
     // This function returns true if the file does not exist. This leads
@@ -1568,7 +1584,6 @@ std::optional<HashResult> compute_edge_hash(Edge* e) {
   for (Node* n : e->outputs[0]->depfile_inputs)
     if (add_node(n))
       return std::nullopt;
-  Rule* rule = find_rule(e);
   merkle.push_back(rule->hash.lo);
   merkle.push_back(rule->hash.hi);
   add_var_expansions(e->scope, rule->begin, rule->end);
