@@ -965,10 +965,10 @@ void resolve_build(Global& global, Scope& scope, Rule& build, Node*& tmp_node) {
     e->first_implicit_input = e->first_order_only_input;
   e->vars = pos;
   if (e->rule_name.empty() && e->inputs.empty()) {
-    for (Node *out : e->outputs)
+    for (Node* out : e->outputs)
       out->allow_missing = true;
   } else {
-    for (Node *out : e->outputs)
+    for (Node* out : e->outputs)
       out->in_edge = e;
   }
 }
@@ -1035,6 +1035,12 @@ struct BuildState {
   size_t total_edges = 0;
   bool total_edges_known = false;
   std::string last_description;
+
+  // These fields are used in the special case of rebuilding the manifest,
+  // where we want to run the generator by exec'ing ourselves.
+  Node* exec_node = nullptr;
+  char* exec_argv0;
+  std::span<char*> exec_args;
 };
 
 std::string ElideMiddle(const std::string& str, size_t width) {
@@ -1195,6 +1201,40 @@ void schedule_subprocess(BuildState& state, Edge* e) {
     close(fd);
   }
 
+  // When rebuilding the manifest, the generator may overwrite the manifest
+  // files. But there's a problem: we have them mapped into memory, we have
+  // pointers to the data in the mapped files and it's unspecified whether
+  // changes to mapped files are reflected in the process's memory. So if we
+  // launch the generator process in the usual way we could end up reading the
+  // wrong data from mapped memory and/or crashing our process. So we launch the
+  // generator process in a different way than usual: we exec ourselves with an
+  // argument specifying the generator command, which our reincarnation will run
+  // before reading the new manifest files.
+  bool needs_exec = false;
+  for (Node* out : e->outputs)
+    if (out == state.exec_node)
+      needs_exec = true;
+  if (needs_exec) {
+    // When the manifest is out of date we only build one target, namely the
+    // manifest itself, so it should have been the last edge to be scheduled.
+    if (!state.subprocesses.empty())
+      error("BUG: concurrent subprocesses running while execing generator");
+    std::vector<char*> new_argv;
+    new_argv.push_back(state.exec_argv0);
+    new_argv.push_back((char*)"--regenerate");
+    new_argv.push_back((char*)command.c_str());
+    if (!proc.depfile.empty()) {
+      new_argv.push_back((char*)"--regenerate-depfile");
+      new_argv.push_back((char*)proc.depfile.c_str());
+    }
+    for (char* arg : state.exec_args)
+      new_argv.push_back(arg);
+    new_argv.push_back(0);
+    puts("");
+    execvp(state.exec_argv0, new_argv.data());
+    error("re-exec failed");
+  }
+
   int fds[2];
   if (pipe2(fds, O_CLOEXEC) != 0)
     error("pipe2 failed");
@@ -1220,13 +1260,46 @@ void schedule_subprocess(BuildState& state, Edge* e) {
   state.subprocesses.push_back(std::move(proc));
 }
 
-std::optional<HashResult> compute_edge_hash(Edge* e);
+std::optional<HashResult> compute_edge_hash(Edge* e, bool generator);
+
+bool is_generator_edge(Edge* e) {
+  if (e->rule_name.empty())
+    return false;
+  Rule* rule = find_rule(e);
+  vars_t rule_vars = parse_indented_vars(rule->begin);
+  vars_t build_vars = parse_indented_vars(e->vars);
+
+  ExpansionScope es(e->scope);
+  es.build_edge = e;
+  es.rule_vars = &rule_vars;
+  es.build_vars = &build_vars;
+
+  std::string generator_expansion;
+  append_named_var_expansion(generator_expansion, "generator", es, 0);
+  return !generator_expansion.empty();
+}
 
 void compute_edge_dirty(Edge* e) {
   if (!e->rule_name.empty()) {
-    std::optional<HashResult> hash = compute_edge_hash(e);
+    // For generator rules we need to omit the command hash. But it's expensive
+    // to figure out whether it's a generator rule (in one test it added around
+    // 5% to our total run time to parse all the bindings). Since generator
+    // rules are rare, we first compute the hash assuming it's not a generator
+    // rule. If it doesn't match, we compute the hash properly and try again.
+    std::optional<HashResult> hash = compute_edge_hash(e, false);
     std::optional<HashResult> bl_hash = e->outputs[0]->build_log_hash;
-    e->dirty = (hash && bl_hash) ? *hash != *bl_hash : true;
+    if (hash && bl_hash) {
+      if (*hash == *bl_hash) {
+        e->dirty = false;
+      } else if (is_generator_edge(e)) {
+        hash = compute_edge_hash(e, true);
+        e->dirty = *hash != *bl_hash;
+      } else {
+        e->dirty = true;
+      }
+    } else {
+      e->dirty = true;
+    }
   } else {
     e->dirty = false;
   }
@@ -1330,6 +1403,40 @@ void read_build_log(Global& global, BuildState& state) {
   dbg("done reading build log\n");
 }
 
+void read_depfile(Global& global, std::string depfile, Node* out) {
+  dbg("read depfile: %s\n", depfile.c_str());
+  int depfile_fd = open(depfile.c_str(), O_RDONLY);
+  if (depfile_fd < 0)
+    error("failed to open depfile");
+  size_t depfile_size = lseek(depfile_fd, 0, SEEK_END);
+  std::string depfile_content(depfile_size, '\0');
+  size_t size;
+  while ((size = pread(depfile_fd, depfile_content.data(), depfile_size, 0)) <
+             0 &&
+         errno == EINTR)
+    ;
+  close(depfile_fd);
+  unlink(depfile.c_str());
+
+  DepfileParser parser;
+  std::string err;
+  if (!parser.Parse(&depfile_content, &err))
+    error("depfile parser failed");
+
+  auto& depfile_inputs = out->depfile_inputs;
+  depfile_inputs.clear();
+  auto* tmp_node = new Node;
+  for (std::string_view input : parser.ins_) {
+    dbg("found depfile entry: %s\n", std::string(input).c_str());
+    std::string buf;
+    tmp_node->path_buf = canonicalize(input, buf);
+    tmp_node->path = tmp_node->path_buf;
+    Node* n = global.nodes.get_or_insert(tmp_node);
+    depfile_inputs.push_back(n);
+  }
+  delete tmp_node;
+}
+
 void write_build_log(BuildState& state, Edge* e) {
   auto introduce_node = [&](Node* n) {
     if (n->build_log_index != -1u)
@@ -1343,7 +1450,7 @@ void write_build_log(BuildState& state, Edge* e) {
   std::vector<uint32_t> depfile_idxs;
   for (Node* n : e->outputs[0]->depfile_inputs)
     depfile_idxs.push_back(introduce_node(n));
-  std::optional<HashResult> hash = compute_edge_hash(e);
+  std::optional<HashResult> hash = compute_edge_hash(e, is_generator_edge(e));
   if (hash) {
     uint32_t idx = introduce_node(e->outputs[0]);
     write(state.log_fd, "", 1);
@@ -1415,37 +1522,7 @@ void monitor_subprocesses(BuildState& state, Global& global) {
     }
 
     if (!depfile.empty()) {
-      dbg("read depfile: %s\n", depfile.c_str());
-      int depfile_fd = open(depfile.c_str(), O_RDONLY);
-      if (depfile_fd < 0)
-        error("failed to open depfile");
-      size_t depfile_size = lseek(depfile_fd, 0, SEEK_END);
-      std::string depfile_content(depfile_size, '\0');
-      size_t size;
-      while ((size = pread(depfile_fd, depfile_content.data(), depfile_size,
-                           0)) < 0 &&
-             errno == EINTR)
-        ;
-      close(depfile_fd);
-      unlink(depfile.c_str());
-
-      DepfileParser parser;
-      std::string err;
-      if (!parser.Parse(&depfile_content, &err))
-        error("depfile parser failed");
-
-      auto& depfile_inputs = e->outputs[0]->depfile_inputs;
-      depfile_inputs.clear();
-      auto* tmp_node = new Node;
-      for (std::string_view input : parser.ins_) {
-        dbg("found depfile entry: %s\n", std::string(input).c_str());
-        std::string buf;
-        tmp_node->path_buf = canonicalize(input, buf);
-        tmp_node->path = tmp_node->path_buf;
-        Node* n = global.nodes.get_or_insert(tmp_node);
-        depfile_inputs.push_back(n);
-      }
-      delete tmp_node;
+      read_depfile(global, depfile, e->outputs[0]);
     } else {
       e->outputs[0]->depfile_inputs.clear();
     }
@@ -1489,25 +1566,11 @@ void monitor_subprocesses(BuildState& state, Global& global) {
 
 vars_t parse_indented_vars(char* pos);
 
-std::optional<HashResult> compute_edge_hash(Edge* e) {
+std::optional<HashResult> compute_edge_hash(Edge* e, bool generator) {
   // Skip phony edges. These are handled recursively when computing the Merkle
   // tree for the referents (see add_inputs below).
   if (e->rule_name.empty())
     return std::nullopt;
-
-  Rule* rule = find_rule(e);
-  vars_t rule_vars = parse_indented_vars(rule->begin);
-  vars_t build_vars = parse_indented_vars(e->vars);
-
-  ExpansionScope es(e->scope);
-  es.build_edge = e;
-  es.rule_vars = &rule_vars;
-  es.build_vars = &build_vars;
-
-  std::string generator;
-  append_named_var_expansion(generator, "generator", es, 0);
-  if (!generator.empty())
-    abort();
   std::vector<uint64_t> merkle;
   auto stat_node = [](Node* n) {
     // This function returns true if the file does not exist. This leads
@@ -1571,9 +1634,11 @@ std::optional<HashResult> compute_edge_hash(Edge* e) {
   };
   std::function<bool(Edge*)> add_inputs;
   add_inputs = [&](Edge* e) {
-    merkle.push_back(e->hash.lo);
-    merkle.push_back(e->hash.hi);
-    add_var_expansions(e->scope, e->begin, e->end);
+    if (!generator) {
+      merkle.push_back(e->hash.lo);
+      merkle.push_back(e->hash.hi);
+      add_var_expansions(e->scope, e->begin, e->end);
+    }
     for (Node* n : e->non_order_only_inputs()) {
       if (n->in_edge && n->in_edge->rule_name.empty()) {
         if (add_inputs(n->in_edge))
@@ -1591,6 +1656,7 @@ std::optional<HashResult> compute_edge_hash(Edge* e) {
   for (Node* n : e->outputs[0]->depfile_inputs)
     if (add_node(n))
       return std::nullopt;
+  Rule* rule = find_rule(e);
   merkle.push_back(rule->hash.lo);
   merkle.push_back(rule->hash.hi);
   add_var_expansions(e->scope, rule->begin, rule->end);
@@ -1776,6 +1842,8 @@ int main(int argc, char** argv) {
   std::string_view manifest_path = "build.ninja";
   std::vector<std::string_view> targets;
   std::string_view tool;
+  char* regenerate = nullptr;
+  char* regenerate_depfile = nullptr;
   for (int i = 1; i != argc; ++i) {
     std::string_view arg = argv[i];
     if (arg == "-f") {
@@ -1784,9 +1852,24 @@ int main(int argc, char** argv) {
       chdir(argv[++i]);
     } else if (arg == "-t") {
       tool = argv[++i];
+    } else if (arg == "--regenerate") {
+      regenerate = argv[++i];
+    } else if (arg == "--regenerate-depfile") {
+      regenerate_depfile = argv[++i];
     } else {
       targets.push_back(arg);
     }
+  }
+
+  if (regenerate) {
+    int pid;
+    const char* argv[] = { "sh", "-c", regenerate, nullptr };
+    if (posix_spawnp(&pid, "sh", nullptr, nullptr, (char* const*)argv,
+                     environ) != 0)
+      error("posix_spawnp failed");
+    int wstatus;
+    if (waitpid(pid, &wstatus, 0) < 0)
+      error("waitpid failed");
   }
 
   bool build_log_required = tool == "" || tool == "loadlog";
@@ -1794,10 +1877,66 @@ int main(int argc, char** argv) {
   auto global = std::make_unique<Global>();
   parse(*global, manifest_path, build_log_required ? &state : nullptr);
   if (tool == "") {
-    std::vector<Edge*> needed_edges;
+    Node* manifest = global->nodes[manifest_path];
+    // Look for the real manifest rebuild rule (GN hides the real rule behind a
+    // phony rule). We need this so we know when rule to exec ourselves on. We
+    // don't support cases where the phony rule expands to more than one real
+    // rule, so we ignore manifest rules where that isn't the case.
+    while (manifest && manifest->in_edge &&
+           manifest->in_edge->rule_name.empty()) {
+      if (manifest->in_edge->inputs.size() != 1) {
+        manifest = nullptr;
+      } else {
+        manifest = manifest->in_edge->inputs[0];
+      }
+    }
     tbb::task_group tg;
+    if (manifest && manifest->in_edge) {
+      // If we just regenerated the manifest (or if we ran for the first time),
+      // we need to make it seem like we ran the generator command as part
+      // of a build, otherwise we will consider the manifest out of date
+      // and try to rebuild it. So we follow the same steps here that would
+      // normally happen after a build command terminates. 
+      if (regenerate || !manifest->build_log_hash) {
+        if (regenerate_depfile)
+          read_depfile(*global, regenerate_depfile, manifest);
+        auto hash = compute_edge_hash(manifest->in_edge,
+                                      is_generator_edge(manifest->in_edge));
+        manifest->build_log_hash = hash;
+        write_build_log(state, manifest->in_edge);
+      }
+
+      // When we exec ourselves we need to exclude the -C argument because
+      // we've already chdir'd. All other arguments should stay the same.
+      std::vector<char*> new_argv;
+      for (int i = 1; i != argc; ++i) {
+        if (strcmp(argv[i], "-C") == 0) {
+          ++i;
+        } else {
+          new_argv.push_back(argv[i]);
+        }
+      }
+      state.exec_node = manifest;
+      state.exec_argv0 = argv[0];
+      state.exec_args = new_argv;
+
+      size_t task_id = 0;
+      std::atomic<size_t> task_count = 0;
+      std::vector<Edge*> needed_edges;
+      mark(tg, manifest, needed_edges, task_id, task_count, state);
+      classify_edges(needed_edges, task_id, task_count, state);
+      tg.wait();
+      if (manifest->in_edge->dirty)
+        monitor_subprocesses(state, *global);
+
+      // Normally monitor_subprocesses would have exec'd ourselves by now,
+      // but a dependency of the manifest edge could have cleaned the manifest
+      // through early cutoff so in that case we want to proceed to the main
+      // build.
+    }
     size_t task_id = 0;
     std::atomic<size_t> task_count = 0;
+    std::vector<Edge*> needed_edges;
     for (auto target : targets) {
       Node* n = global->nodes[target];
       if (!n)
