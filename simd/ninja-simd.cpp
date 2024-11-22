@@ -207,9 +207,10 @@ struct Node {
   bool allow_missing = false;
   bool nonexistent = false;
   std::atomic<bool> statted = false;
-  struct timespec mtime;
+  bool has_build_log_hash;
   uint32_t build_log_index = -1u;
-  std::optional<HashResult> build_log_hash;
+  struct timespec mtime;
+  HashResult build_log_hash;
   std::vector<Node*> depfile_inputs;
 };
 
@@ -1287,13 +1288,13 @@ void compute_edge_dirty(Edge* e) {
     // rules are rare, we first compute the hash assuming it's not a generator
     // rule. If it doesn't match, we compute the hash properly and try again.
     std::optional<HashResult> hash = compute_edge_hash(e, false);
-    std::optional<HashResult> bl_hash = e->outputs[0]->build_log_hash;
-    if (hash && bl_hash) {
-      if (*hash == *bl_hash) {
+    if (hash && e->outputs[0]->has_build_log_hash) {
+      HashResult bl_hash = e->outputs[0]->build_log_hash;
+      if (*hash == bl_hash) {
         e->dirty = false;
       } else if (is_generator_edge(e)) {
         hash = compute_edge_hash(e, true);
-        e->dirty = *hash != *bl_hash;
+        e->dirty = *hash != bl_hash;
       } else {
         e->dirty = true;
       }
@@ -1386,6 +1387,7 @@ void read_build_log(Global& global, BuildState& state) {
     Node* node = nodes[idx];
     HashResult hash;
     memcpy(&hash, pos, 16);
+    node->has_build_log_hash = true;
     node->build_log_hash = hash;
     uint32_t depfile_idx_count;
     memcpy(&depfile_idx_count, pos + 16, 4);
@@ -1897,12 +1899,15 @@ int main(int argc, char** argv) {
       // of a build, otherwise we will consider the manifest out of date
       // and try to rebuild it. So we follow the same steps here that would
       // normally happen after a build command terminates. 
-      if (regenerate || !manifest->build_log_hash) {
+      if (regenerate || !manifest->has_build_log_hash) {
         if (regenerate_depfile)
           read_depfile(*global, regenerate_depfile, manifest);
         auto hash = compute_edge_hash(manifest->in_edge,
                                       is_generator_edge(manifest->in_edge));
-        manifest->build_log_hash = hash;
+        manifest->has_build_log_hash = hash.has_value();
+        if (hash) {
+          manifest->build_log_hash = *hash;
+        }
         write_build_log(state, manifest->in_edge);
       }
 
