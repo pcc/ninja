@@ -199,16 +199,16 @@ struct Edge {
 };
 
 struct Node {
+  std::string_view path __attribute__((aligned(16)));
   Node* next = nullptr;
-  std::string_view path;
   std::string path_buf;
   std::vector<Edge*> out_edges;
   Edge* in_edge = nullptr;
   bool allow_missing = false;
   bool nonexistent = false;
   std::atomic<bool> statted = false;
-  bool has_build_log_hash;
-  uint32_t build_log_index = -1u;
+  bool has_build_log_hash = false;
+  uint32_t build_log_index = 0;
   struct timespec mtime;
   HashResult build_log_hash;
   std::vector<Node*> depfile_inputs;
@@ -219,22 +219,30 @@ struct Node {
 // only supports the operations that we need. In particular, because we do
 // not support resizing, the data structure can be made lock-free.
 //
-// Each bucket is an atomic pointer. The assumption is that the number of nodes
-// will be large, so the data structure consists of a fixed size array of 1M
-// bucket. (In the future we may consider dynamically sizing the array based on
-// a node count recorded in the build log.) Insertion operations add the new
-// node onto the head of the linked list stored in the bucket. Our first
-// compare-exchange assumes the bucket to be empty (given the array size, this
-// is likely to be true) and if that operation fails, we search the linked list
-// for an existing node and compare-exchange the old head with a new one if it
-// fails.
+// Each bucket is a char array of size sizeof(Node) that gets casted into
+// an object of type Node as necessary, so it's basically a flat hash map. This
+// avoids a pointer load in the common case where the slot is unoccupied. The
+// assumption is that the number of nodes will be large, so the data structure
+// consists of a fixed size array of 1M buckets. (In the future we may consider
+// dynamically sizing the array based on a node count recorded in the build
+// log.) Insertion operations either atomically compare-exchange the path field
+// with the new path, or if that fails add the new node onto the head of the
+// linked list stored in the bucket by compare-exchanging its next field. Our
+// first compare-exchange assumes the bucket to be empty (given the array size,
+// this is likely to be true) and if that operation fails, we search the linked
+// list for an existing node and compare-exchange the old head with a new one if
+// it fails.
+//
+// For now, we make the following assumptions:
+// - Everything in Node is zero initializable, except for path_buf.
+// - sizeof(std::string_view) == 16.
 struct BigMap {
   static constexpr size_t array_size = 1 << 20;
-  std::atomic<Node*> nodes[array_size] = {};
+  char nodes[array_size][sizeof(Node)] = {};
 
-  Node* operator[](std::string_view path) const {
+  Node* operator[](std::string_view path) {
     HashResult hash = hash_buf(path.begin(), path.size());
-    Node* node = nodes[hash.lo & (BigMap::array_size - 1)];
+    Node* node = reinterpret_cast<Node *>(nodes[hash.lo & (BigMap::array_size - 1)]);
     while (node) {
       if (node->path == path)
         return node;
@@ -245,13 +253,34 @@ struct BigMap {
 
   // Finds an existing node with path == tmp_node->path and returns it,
   // otherwise inserts tmp_node into the map and returns it. If the insert
-  // operation succeeds, tmp_node will be replaced with a newly allocated node.
+  // operation results in the BigMap taking ownership of tmp_node, tmp_node
+  // will be replaced with a newly allocated node.
   Node* get_or_insert(Node*& tmp_node) {
     HashResult hash = hash_buf(tmp_node->path.begin(), tmp_node->path.size());
-    std::atomic<Node*>& slot = nodes[hash.lo & (BigMap::array_size - 1)];
+    Node* slot =
+        reinterpret_cast<Node*>(nodes[hash.lo & (BigMap::array_size - 1)]);
+    static_assert(sizeof(std::string_view) == 16);
+    auto* path_atomic = reinterpret_cast<std::atomic<__int128>*>(&slot->path);
+    __int128 new_path_atomic = *reinterpret_cast<__int128*>(&tmp_node->path);
+    __int128 existing_path = 0;
+    if (path_atomic->compare_exchange_strong(existing_path, new_path_atomic,
+                                             std::memory_order_acq_rel)) {
+      new (&slot->path_buf) std::string;
+      slot->path_buf = std::move(tmp_node->path_buf);
+      if (!slot->path_buf.empty()) {
+        slot->path = slot->path_buf;
+      }
+      return slot;
+    }
+    if (*reinterpret_cast<std::string_view*>(&existing_path) ==
+        tmp_node->path) {
+      return slot;
+    }
     Node* value = nullptr;
+    std::atomic<Node*>& next =
+        *reinterpret_cast<std::atomic<Node*>*>(&slot->next);
     while (1) {
-      if (slot.compare_exchange_strong(value, tmp_node,
+      if (next.compare_exchange_strong(value, tmp_node,
                                        std::memory_order_acq_rel)) {
         Node* inserted_node = tmp_node;
         tmp_node = new Node;
@@ -272,8 +301,9 @@ struct BigMap {
 
   size_t size() const {
     size_t size = 0;
-    for (Node* node : nodes) {
-      while (node) {
+    for (const char* node_ptr : nodes) {
+      auto *node = reinterpret_cast<const Node *>(node_ptr);
+      while (node && !node->path.empty()) {
         ++size;
         node = node->next;
       }
@@ -1372,7 +1402,7 @@ void read_build_log(Global& global, BuildState& state) {
     } else {
       tmp_node->path = std::string_view(pos, node_len);
       Node* n = global.nodes.get_or_insert(tmp_node);
-      n->build_log_index = nodes.size();
+      n->build_log_index = nodes.size() + 1;
       nodes.push_back(n);
       pos += node_len + 1;
     }
@@ -1441,13 +1471,14 @@ void read_depfile(Global& global, std::string depfile, Node* out) {
 
 void write_build_log(BuildState& state, Edge* e) {
   auto introduce_node = [&](Node* n) {
-    if (n->build_log_index != -1u)
-      return n->build_log_index;
+    if (n->build_log_index != 0)
+      return n->build_log_index - 1;
     if (n->path.empty())
       error("attempt to introduce an empty path");
     write(state.log_fd, n->path.data(), n->path.size());
     write(state.log_fd, "", 1);
-    return n->build_log_index = state.build_log_next_index++;
+    n->build_log_index = ++state.build_log_next_index;
+    return n->build_log_index - 1;
   };
   std::vector<uint32_t> depfile_idxs;
   for (Node* n : e->outputs[0]->depfile_inputs)
