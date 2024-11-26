@@ -179,6 +179,7 @@ struct Edge {
   size_t first_implicit_output = -1ul;
   size_t first_implicit_input = -1ul;
   size_t first_order_only_input = -1ul;
+  size_t first_validation_input = -1ul;
   std::span<Node*> explicit_outputs() {
     return std::span<Node*>(outputs).subspan(0, first_implicit_output);
   }
@@ -981,19 +982,31 @@ void resolve_build(Global& global, Scope& scope, Rule& build, Node*& tmp_node) {
   while (1) {
     Var in = var_token<ColonIsToken | SpaceIsSeparator>(pos);
     if (in.value == "|") {
+      if (e->first_order_only_input != -1ul)
+        error("implicit inputs must appear before order only inputs");
+      if (e->first_validation_input != -1ul)
+        error("implicit inputs must appear before validation inputs");
       e->first_implicit_input = e->inputs.size();
       continue;
     }
     if (in.value == "||") {
+      if (e->first_validation_input != -1ul)
+        error("order only inputs must appear before validation inputs");
       e->first_order_only_input = e->inputs.size();
+      continue;
+    }
+    if (in.value == "|@") {
+      e->first_validation_input = e->inputs.size();
       continue;
     }
     if (in.value == "")
       break;
     e->inputs.push_back(get_or_create_node(in));
   }
+  if (e->first_validation_input == -1ul)
+    e->first_validation_input = e->inputs.size();
   if (e->first_order_only_input == -1ul)
-    e->first_order_only_input = e->inputs.size();
+    e->first_order_only_input = e->first_validation_input;
   if (e->first_implicit_input == -1ul)
     e->first_implicit_input = e->first_order_only_input;
   e->vars = pos;
