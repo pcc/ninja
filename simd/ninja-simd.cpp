@@ -267,6 +267,7 @@ struct BigMap {
                                              std::memory_order_acq_rel)) {
       new (&slot->path_buf) std::string;
       slot->path_buf = std::move(tmp_node->path_buf);
+      tmp_node->path_buf.clear();
       if (!slot->path_buf.empty()) {
         slot->path = slot->path_buf;
       }
@@ -274,6 +275,7 @@ struct BigMap {
     }
     if (*reinterpret_cast<std::string_view*>(&existing_path) ==
         tmp_node->path) {
+      tmp_node->path_buf.clear();
       return slot;
     }
     Node* value = nullptr;
