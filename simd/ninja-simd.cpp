@@ -136,6 +136,54 @@ using namespace oneapi;
 // [1] https://neugierig.org/software/blog/2022/03/n2.html
 // [2] https://arxiv.org/pdf/1902.08318
 
+int trace_fd = -1;
+
+timespec now() {
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts;
+}
+
+timespec prog_begin = now();
+
+struct Trace {
+  std::string name;
+  void *ptr;
+  timespec begin = now();
+  Trace(std::string name, void *ptr = 0) : name(name), ptr(ptr) {}
+  ~Trace() {
+    if (trace_fd != -1) {
+      timespec end = now();
+      uint64_t begin64 = (begin.tv_sec * 1000000000 + begin.tv_nsec) -
+                         (prog_begin.tv_sec * 1000000000 + prog_begin.tv_nsec);
+      uint64_t dur64 = (end.tv_sec * 1000000000 + end.tv_nsec) -
+                       (begin.tv_sec * 1000000000 + begin.tv_nsec);
+      dprintf(
+          trace_fd,
+          ", {\"name\": \"%s %p\", \"cat\": \"parser\", \"ph\": \"X\", \"ts\": "
+          "%lu, \"dur\": %lu, \"pid\": %d, \"tid\": %d, \"args\": {}}",
+          name.c_str(), ptr, begin64 / 1000, dur64 / 1000, getpid(), gettid());
+    }
+  }
+};
+
+struct TraceWriter {
+  TraceWriter(const char *path) {
+    trace_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (trace_fd == -1)
+      abort();
+  }
+  ~TraceWriter() {
+    if (lseek(trace_fd, 0, SEEK_CUR) == 0) {
+      write(trace_fd, "[]", 2);
+    } else {
+      write(trace_fd, "]", 1);
+      lseek(trace_fd, 0, SEEK_SET);
+      write(trace_fd, "[", 1);
+    }
+  }
+};
+
 struct HashResult {
   uint64_t lo, hi;
   bool operator==(const HashResult& other) const {
@@ -729,14 +777,6 @@ vars_t parse_indented_vars(char* pos);
 void resolve_build(Global& global, Scope& scope, char* pos, HashResult hash,
                    Node*& tmp_node);
 
-timespec now() {
-  timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts;
-}
-
-timespec prog_begin = now();
-
 void print_difference(timespec a, timespec b) {
   uint64_t a64 = a.tv_sec * 1000000000 + a.tv_nsec;
   uint64_t b64 = b.tv_sec * 1000000000 + b.tv_nsec;
@@ -757,6 +797,7 @@ void dbg(const char* format, ...) {
 void scan_file_range(tbb::task_group& tg, Global& global, Scope& scope,
                      ScannedFileRangeVec& scanned_file_ranges, char* begin,
                      char* end, char* file_end) {
+  Trace _("scan_file_range");
   auto scanned_file_range = std::make_shared<ScannedFileRange>();
   auto* tmp_node = new Node;
   char* pos = begin;
@@ -1022,6 +1063,7 @@ void resolve_build(Global& global, Scope& scope, Rule& build, Node*& tmp_node) {
 void parse_scope(tbb::task_group& tg, Global& global, Scope* parent,
                  std::string_view path) {
   auto* s = new Scope;
+  Trace _("parse_scope", s);
   s->parent = parent;
 
   tbb::task_group scan_tg;
@@ -1044,6 +1086,7 @@ void parse_scope(tbb::task_group& tg, Global& global, Scope* parent,
       tg.run([&tg, &global, s, path]() { parse_scope(tg, global, s, path); });
     }
     tg.run([&global, s, scanned_file_range]() {
+      Trace _("resolve_build loop", s);
       Node* tmp_node = new Node;
       for (Rule& rule : scanned_file_range->build)
         resolve_build(global, *s, rule, tmp_node);
@@ -1379,6 +1422,7 @@ void compute_edge_dirty(Edge* e) {
 // processed in parallel. It may turn out to be necessary to redesign the format
 // and/or the parser to better support parallel processing.
 void read_build_log(Global& global, BuildState& state) {
+  Trace _("read_build_log");
   state.log_fd = open(".pom_log", O_CREAT | O_RDWR | O_CLOEXEC, 0644);
   if (state.log_fd < 0)
     error("failed to open build log");
@@ -1844,6 +1888,7 @@ vars_t parse_indented_vars(char* pos) {
 
 void parse(Global& global, std::string_view path,
            BuildState* state_for_build_log) {
+  Trace _("parse");
   tbb::task_group tg;
   if (state_for_build_log) {
     tg.run([&]() { read_build_log(global, *state_for_build_log); });
@@ -1886,6 +1931,11 @@ int main(int argc, char** argv) {
   syscall(__NR_prctl, PR_PAC_SET_ENABLED_KEYS,
           PR_PAC_APDAKEY | PR_PAC_APDBKEY | PR_PAC_APIAKEY | PR_PAC_APIBKEY, 0,
           0, 0);
+
+  std::unique_ptr<TraceWriter> tw;
+  if (const char *path = getenv("POM_TRACE")) {
+    tw = std::make_unique<TraceWriter>(path);
+  }
 
   std::string_view manifest_path = "build.ninja";
   std::vector<std::string_view> targets;
@@ -2012,5 +2062,6 @@ int main(int argc, char** argv) {
     error("unsupported tool");
   }
   fflush(stdout);
+  tw.reset();
   _exit(0);
 }
