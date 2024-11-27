@@ -784,8 +784,9 @@ void print_difference(timespec a, timespec b) {
           ((a64 - b64) % 1000000000) / 1000);
 }
 
+static bool debug_enabled = getenv("POM_DEBUG");
+
 void dbg(const char* format, ...) {
-  static bool debug_enabled = getenv("POM_DEBUG");
   if (!debug_enabled)
     return;
   print_difference(now(), prog_begin);
@@ -1900,7 +1901,8 @@ void parse(Global& global, std::string_view path,
   }
   parse_scope(tg, global, nullptr, path);
   tg.wait();
-  dbg("%zu nodes\n", global.nodes.size());
+  if (debug_enabled)
+    dbg("%zu nodes\n", global.nodes.size());
 }
 
 void print_command(Edge* e) {
