@@ -214,7 +214,7 @@ struct ToplevelVar : Var {
   HashResult hash;
 };
 
-using rules_t = std::unordered_map<std::string_view, Rule>;
+using rules_t = tbb::concurrent_hash_map<std::string_view, Rule>;
 using vars_t = std::unordered_map<std::string_view, Var>;
 using toplevel_vars_t = std::unordered_map<std::string_view, ToplevelVar>;
 
@@ -797,7 +797,7 @@ void dbg(const char* format, ...) {
 void scan_file_range(tbb::task_group& tg, Global& global, Scope& scope,
                      ScannedFileRangeVec& scanned_file_ranges, char* begin,
                      char* end, char* file_end) {
-  Trace _("scan_file_range");
+  Trace _("scan_file_range", &scope);
   auto scanned_file_range = std::make_shared<ScannedFileRange>();
   auto* tmp_node = new Node;
   char* pos = begin;
@@ -1095,13 +1095,20 @@ void parse_scope(tbb::task_group& tg, Global& global, Scope* parent,
   }
 
   for (auto& scanned_file_range : scanned_file_ranges) {
-    for (Rule& rule : scanned_file_range->rule) {
-      bool simple;
-      char* pos = rule.begin;
-      std::string_view name =
-          token<EqualsIsToken | ColonIsToken | SpaceIsSeparator>(pos, simple);
-      s->rule[name] = { pos, rule.end, rule.hash };
-    }
+    if (scanned_file_range->rule.empty())
+      continue;
+    tg.run([&global, s, scanned_file_range]() {
+      Trace _("parse_scope rule loop", s);
+      for (Rule& rule : scanned_file_range->rule) {
+        bool simple;
+        char* pos = rule.begin;
+        std::string_view name =
+            token<EqualsIsToken | ColonIsToken | SpaceIsSeparator>(pos, simple);
+        decltype(s->rule)::accessor a;
+        s->rule.insert(a, name);
+        a->second = { pos, rule.end, rule.hash };
+      }
+    });
   }
 }
 
@@ -1217,14 +1224,12 @@ Rule* find_rule(Edge* e) {
   std::string_view rule_name = e->rule_name;
   rules_t::iterator i;
   while (cur_scope) {
-    i = cur_scope->rule.find(rule_name);
-    if (i != cur_scope->rule.end())
-      break;
+    decltype(cur_scope->rule)::accessor a;
+    if (cur_scope->rule.find(a, rule_name))
+      return &a->second;
     cur_scope = cur_scope->parent;
   }
-  if (!cur_scope)
-    error("could not find rule");
-  return &i->second;
+  error("could not find rule");
 }
 
 void schedule_subprocess(BuildState& state, Edge* e) {
