@@ -930,7 +930,7 @@ void scan_file(tbb::task_group& tg, Global& global, Scope& scope,
 
   static size_t page_size = sysconf(_SC_PAGESIZE);
   void* addr;
-  if (size % page_size > page_size - sizeof(SIMDVec)) {
+  if (size % page_size > page_size - sizeof(SIMDVec) || size % page_size == 0) {
     void* nulls_addr =
         mmap(0, size + page_size, PROT_READ, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (nulls_addr == MAP_FAILED)
