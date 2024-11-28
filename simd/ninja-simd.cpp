@@ -41,6 +41,7 @@
 #include "oneapi/tbb/concurrent_hash_map.h"
 #include "oneapi/tbb/concurrent_vector.h"
 #include "oneapi/tbb/parallel_for_each.h"
+#include "oneapi/tbb/parallel_pipeline.h"
 #include "oneapi/tbb/task_group.h"
 
 #define XXH_INLINE_ALL
@@ -1793,17 +1794,7 @@ std::optional<HashResult> compute_edge_hash(Edge* e, bool generator) {
 //
 // To set up stat() to be parallelized, we create a pipeline between the
 // post-order traversal, the stat() calls and hash computation and the
-// dirty/clean/initial edge classification. The post-order traversal is
-// performed by the mark() function. After it has collected a batch of edges of
-// size 1024, it starts a task to call the classify_edges() function, which
-// handles steps 1 and 2. The work for step 1 can happen in any order relative
-// to other tasks because it is independent of other edges, but step 2 must
-// preserve the post-order traversal ordering. We handle this by using an atomic
-// variable to keep track of how many previous tasks have finished step 2. After
-// step 1 we spin reading from the atomic variable, and once the number of tasks
-// reaches our task identifier, which is assigned sequentially by mark(), we
-// perform our work on step 2 and increment the variable to unblock the next
-// task.
+// dirty/clean/initial edge classification using TBB's parallel_pipeline.
 //
 // When an edge subprocess terminates, we need to schedule any edges that were
 // blocked by that edge. Such edges are identified using the out_edges array on
@@ -1813,59 +1804,81 @@ std::optional<HashResult> compute_edge_hash(Edge* e, bool generator) {
 // outputs of dirty edges. This also implies that although we can start edge
 // subprocesses during classify_edges(), handling subprocess completion needs to
 // wait until after all tasks are finished with step 2.
-void classify_edges(std::span<Edge* const> edges, size_t task_id,
-                    std::atomic<size_t>& task_count, BuildState& state) {
-  Trace _("classify_edges");
-  for (Edge* e : edges)
-    compute_edge_dirty(e);
-  {
-    Trace _("classify_edges blocked");
-    while (task_count.load(std::memory_order_acquire) != task_id)
-      ;
-  }
-  for (Edge* e : edges) {
-    bool has_dirty_dep = false;
-    for (Node* dep : e->inputs) {
-      if (dep->in_edge && dep->in_edge->dirty) {
-        dep->out_edges.push_back(e);
-        has_dirty_dep = true;
-      }
-    }
-    if (has_dirty_dep)
-      e->dirty = true;
-    if (e->dirty && !e->rule_name.empty())
-      ++state.total_edges;
-    if (e->dirty && !has_dirty_dep) {
-      static bool first = false;
-      if (!first) {
-        first = true;
-        dbg("schedule first task\n");
-      }
-      schedule_subprocess(state, e);
-    }
-  }
-  task_count.store(task_id + 1, std::memory_order_release);
-}
+struct PostOrderMark {
+  std::vector<std::pair<Edge*, size_t>>& stack;
+  PostOrderMark(std::vector<std::pair<Edge*, size_t>>& stack) : stack(stack) {}
 
-void mark(tbb::task_group& tg, Node* n, std::vector<Edge*>& needed_edges,
-          size_t& task_id, std::atomic<size_t>& task_count, BuildState& state) {
-  if (!n->in_edge)
-    return;
-  Edge* e = n->in_edge;
-  if (e->needed)
-    return;
-  e->needed = true;
-  for (Node* dep : e->inputs)
-    mark(tg, dep, needed_edges, task_id, task_count, state);
-  needed_edges.push_back(e);
-  constexpr size_t chunk_size = 1024;
-  if (needed_edges.size() == chunk_size) {
-    tg.run([needed_edges, task_id, &task_count, &state]() {
-      classify_edges(needed_edges, task_id, task_count, state);
-    });
-    ++task_id;
-    needed_edges.clear();
+  void visit(Node *n) const {
+    if (!n->in_edge)
+      return;
+    Edge* e = n->in_edge;
+    if (e->needed)
+      return;
+    e->needed = true;
+    stack.push_back({e, 0});
   }
+
+  std::vector<Edge*> operator()(tbb::flow_control& fc) const {
+                     Trace _("mark edges");
+    constexpr size_t chunk_size = 1024;
+    std::vector<Edge*> needed_edges;
+    while (!stack.empty() && needed_edges.size() != chunk_size) {
+      std::pair<Edge*, size_t> entry = stack.back();
+      stack.pop_back();
+      if (entry.second == entry.first->inputs.size()) {
+        needed_edges.push_back(entry.first);
+      } else {
+        stack.push_back({entry.first, entry.second + 1});
+        visit(entry.first->inputs[entry.second]);
+      }
+    }
+    if (needed_edges.empty())
+      fc.stop();
+    return needed_edges;
+  }
+};
+
+void mark(Node* n, BuildState& state) {
+  std::vector<std::pair<Edge*, size_t>> stack;
+  PostOrderMark m(stack);
+  m.visit(n);
+
+  tbb::parallel_pipeline(
+      128, tbb::make_filter<void, std::vector<Edge*>>(
+               tbb::filter_mode::serial_in_order, m) &
+               tbb::make_filter<std::vector<Edge*>, std::vector<Edge*>>(
+                   tbb::filter_mode::parallel,
+                   [&](std::vector<Edge*> edges) {
+                     Trace _("stat edges");
+                     for (Edge* e : edges)
+                       compute_edge_dirty(e);
+                     return edges;
+                   }) &
+               tbb::make_filter<std::vector<Edge*>, void>(
+                   tbb::filter_mode::serial_in_order, [&](std::vector<Edge*> edges) {
+                     Trace _("classify edges");
+                     for (Edge* e : edges) {
+                       bool has_dirty_dep = false;
+                       for (Node* dep : e->inputs) {
+                         if (dep->in_edge && dep->in_edge->dirty) {
+                           dep->out_edges.push_back(e);
+                           has_dirty_dep = true;
+                         }
+                       }
+                       if (has_dirty_dep)
+                         e->dirty = true;
+                       if (e->dirty && !e->rule_name.empty())
+                         ++state.total_edges;
+                       if (e->dirty && !has_dirty_dep) {
+                         static bool first = false;
+                         if (!first) {
+                           first = true;
+                           dbg("schedule first task\n");
+                         }
+                         schedule_subprocess(state, e);
+                       }
+                     }
+                   }));
 }
 
 vars_t parse_indented_vars(char* pos) {
@@ -1999,7 +2012,6 @@ int main(int argc, char** argv) {
         manifest = manifest->in_edge->inputs[0];
       }
     }
-    tbb::task_group tg;
     if (manifest && manifest->in_edge) {
       // If we just regenerated the manifest (or if we ran for the first time),
       // we need to make it seem like we ran the generator command as part
@@ -2032,12 +2044,7 @@ int main(int argc, char** argv) {
       state.exec_argv0 = argv[0];
       state.exec_args = new_argv;
 
-      size_t task_id = 0;
-      std::atomic<size_t> task_count = 0;
-      std::vector<Edge*> needed_edges;
-      mark(tg, manifest, needed_edges, task_id, task_count, state);
-      classify_edges(needed_edges, task_id, task_count, state);
-      tg.wait();
+      mark(manifest, state);
       if (manifest->in_edge->dirty)
         monitor_subprocesses(state, *global);
 
@@ -2046,17 +2053,12 @@ int main(int argc, char** argv) {
       // through early cutoff so in that case we want to proceed to the main
       // build.
     }
-    size_t task_id = 0;
-    std::atomic<size_t> task_count = 0;
-    std::vector<Edge*> needed_edges;
     for (auto target : targets) {
       Node* n = global->nodes[target];
       if (!n)
         error("unknown target");
-      mark(tg, n, needed_edges, task_id, task_count, state);
+      mark(n, state);
     }
-    classify_edges(needed_edges, task_id, task_count, state);
-    tg.wait();
     state.total_edges_known = true;
     dbg("monitoring subprocesses\n");
     monitor_subprocesses(state, *global);
