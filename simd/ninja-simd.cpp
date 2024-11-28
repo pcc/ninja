@@ -1815,10 +1815,14 @@ std::optional<HashResult> compute_edge_hash(Edge* e, bool generator) {
 // wait until after all tasks are finished with step 2.
 void classify_edges(std::span<Edge* const> edges, size_t task_id,
                     std::atomic<size_t>& task_count, BuildState& state) {
+  Trace _("classify_edges");
   for (Edge* e : edges)
     compute_edge_dirty(e);
-  while (task_count.load(std::memory_order_acquire) != task_id)
-    ;
+  {
+    Trace _("classify_edges blocked");
+    while (task_count.load(std::memory_order_acquire) != task_id)
+      ;
+  }
   for (Edge* e : edges) {
     bool has_dirty_dep = false;
     for (Node* dep : e->inputs) {
