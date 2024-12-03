@@ -2064,11 +2064,19 @@ int main(int argc, char** argv) {
     monitor_subprocesses(state, *global);
     dbg("done\n");
   } else if (tool == "commands") {
+    bool single = false;
     for (auto target : targets) {
+      if (target == "-s") {
+        single = true;
+        continue;
+      }
       Node* n = global->nodes[target];
       if (!n)
         error("unknown target");
-      print_commands(n);
+      if (!single)
+        print_commands(n);
+      else if (n->in_edge)
+        print_command(n->in_edge);
     }
   } else if (tool == "loadlog") {
   } else {
