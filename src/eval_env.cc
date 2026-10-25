@@ -19,6 +19,8 @@
 using namespace std;
 
 const StringPiece* BindingEnv::Find(StringPiece var) const {
+  if (!(binding_mask_ & VariableNameSignature(var)))
+    return NULL;
   if (index_) {
     auto i = index_->find(var);
     return i != index_->end() ? &bindings_[i->second].second : NULL;
@@ -65,6 +67,7 @@ void BindingEnv::AddBindingView(StringPiece key, StringPiece val) {
     return;
   }
   bindings_.emplace_back(key, val);
+  binding_mask_ |= VariableNameSignature(key);
   const size_t kMaxUnindexed = 16;
   if (index_) {
     index_->emplace(key, bindings_.size() - 1);
@@ -98,10 +101,13 @@ const Rule* BindingEnv::LookupRule(StringPiece rule_name) {
 }
 
 void Rule::AddBinding(const string& key, const EvalString& val) {
+  binding_mask_ |= VariableNameSignature(key);
   bindings_[key] = val;
 }
 
 const EvalString* Rule::GetBinding(StringPiece key) const {
+  if (!(binding_mask_ & VariableNameSignature(key)))
+    return NULL;
   Bindings::const_iterator i = bindings_.find(key);
   if (i == bindings_.end())
     return NULL;

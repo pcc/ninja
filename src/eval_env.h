@@ -27,6 +27,18 @@
 
 struct Rule;
 
+/// A signature of a variable name, for quickly checking that a set of
+/// names doesn't contain it: a set has a mask of the signatures of its
+/// names, which includes the signature of every name in the set.
+inline uint64_t VariableNameSignature(StringPiece name) {
+  if (name.len_ == 0)
+    return 1;
+  unsigned bits = static_cast<unsigned>(name.len_) * 31 +
+                  static_cast<unsigned char>(name.str_[0]) * 7 +
+                  static_cast<unsigned char>(name.str_[name.len_ - 1]);
+  return uint64_t(1) << (bits & 63);
+}
+
 /// An interface for a scope for variable (e.g. "$foo") lookups.
 struct Env {
   virtual ~Env() {}
@@ -98,6 +110,8 @@ struct Rule {
   std::string name_;
   typedef std::map<std::string, EvalString, StringPieceLess> Bindings;
   Bindings bindings_;
+  /// See VariableNameSignature().
+  uint64_t binding_mask_ = 0;
   bool phony_ = false;
 };
 
@@ -143,6 +157,8 @@ private:
 
   /// The bindings: few, usually, so they are in a vector.
   std::vector<std::pair<StringPiece, StringPiece> > bindings_;
+  /// See VariableNameSignature().
+  uint64_t binding_mask_ = 0;
   /// An index of bindings_, once there are many.
   std::unique_ptr<std::unordered_map<StringPiece, size_t> > index_;
   /// Storage for the keys and values that are not views.
