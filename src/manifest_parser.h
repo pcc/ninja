@@ -47,6 +47,9 @@ struct ManifestParser : public Parser {
   ManifestParser(State* state, FileReader* file_reader,
                  ManifestParserOptions options = ManifestParserOptions());
 
+  /// Load and parse a file.
+  bool Load(const std::string& filename, std::string* err);
+
   /// Parse a text string of input.  Used by tests.
   bool ParseTest(const std::string& input, std::string* err) {
     quiet_ = true;
@@ -62,6 +65,12 @@ struct ManifestParser : public Parser {
   /// Parse a file, given its contents as a string.
   bool Parse(const std::string& filename, const std::string& input,
              std::string* err);
+
+  /// Parse a file, given its contents (which this takes).
+  bool ParseContents(const std::string& filename, std::string* contents,
+                     std::string* err);
+  /// Parse the top-level file (a ParsedFile, which this takes).
+  bool ParseRoot(void* root_file, std::string* err);
 
   struct Merger;
   friend struct Merger;

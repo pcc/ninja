@@ -170,6 +170,7 @@ graph):
 | baseline (upstream ninja)      |   817 |    757 |
 | (all of the above)             |   315 |    284 |
 | process big files in chunks    |   225 |    185 |
+| map big manifests, no copies   |   108 |     82 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

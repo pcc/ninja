@@ -28,6 +28,8 @@
 
 #include <sstream>
 #else
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #endif
 
@@ -335,6 +337,65 @@ bool RealDiskInterface::MakeDir(const string& path) {
     return false;
   }
   return true;
+}
+
+FileContents::~FileContents() {
+#ifndef _WIN32
+  if (mapping)
+    munmap(mapping, mapping_size);
+#endif
+}
+
+FileReader::Status FileReader::LoadFile(const std::string& path,
+                                        size_t padding,
+                                        FileContents* contents,
+                                        std::string* err) {
+  Status status = ReadFile(path, &contents->storage, err);
+  if (status != Okay)
+    return status;
+  contents->size = contents->storage.size();
+  contents->storage.append(padding, '\0');
+  contents->data = contents->storage.data();
+  return Okay;
+}
+
+FileReader::Status RealDiskInterface::LoadFile(const std::string& path,
+                                               size_t padding,
+                                               FileContents* contents,
+                                               std::string* err) {
+#ifndef _WIN32
+  // Map large files, which saves copying them.  Small ones are faster to
+  // read.
+  const size_t kMinMapSize = 1 << 20;
+  int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd >= 0) {
+    struct stat st;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+        static_cast<size_t>(st.st_size) >= kMinMapSize) {
+      size_t size = st.st_size;
+      size_t page = sysconf(_SC_PAGESIZE);
+      size_t mapping_size = (size + padding + page - 1) / page * page;
+      // Reserve (zeroed) memory for the file and the padding, and map the
+      // file over the start of it.  The rest of its last page reads as zeros.
+      void* mapping = mmap(NULL, mapping_size, PROT_READ,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      if (mapping != MAP_FAILED) {
+        if (mmap(mapping, size, PROT_READ, MAP_PRIVATE | MAP_FIXED, fd, 0) !=
+            MAP_FAILED) {
+          close(fd);
+          contents->mapping = mapping;
+          contents->mapping_size = mapping_size;
+          contents->data = static_cast<const char*>(mapping);
+          contents->size = size;
+          return Okay;
+        }
+        munmap(mapping, mapping_size);
+      }
+    }
+    close(fd);
+  }
+#endif
+  return FileReader::LoadFile(path, padding, contents, err);
 }
 
 FileReader::Status RealDiskInterface::ReadFile(const string& path,

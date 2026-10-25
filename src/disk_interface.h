@@ -22,6 +22,23 @@
 
 /// Interface for reading files from disk.  See DiskInterface for details.
 /// This base offers the minimum interface needed just to read files.
+/// The contents of a file loaded by FileReader::LoadFile().
+struct FileContents {
+  FileContents() = default;
+  FileContents(const FileContents&) = delete;
+  FileContents& operator=(const FileContents&) = delete;
+  ~FileContents();
+
+  /// The contents, followed by padding NUL bytes.
+  const char* data = nullptr;
+  size_t size = 0;
+
+  /// Where the contents are: in storage, or mapped.
+  std::string storage;
+  void* mapping = nullptr;
+  size_t mapping_size = 0;
+};
+
 struct FileReader {
   virtual ~FileReader() {}
 
@@ -39,6 +56,13 @@ struct FileReader {
 
   /// Whether ReadFile() may be called from several threads at once.
   virtual bool IsReadFileThreadSafe() const { return false; }
+
+  /// Like ReadFile(), but the contents are followed by at least \a padding
+  /// NUL bytes, and may be mapped into memory instead of read (for large
+  /// files), so the file must not be truncated while the contents are in
+  /// use.
+  virtual Status LoadFile(const std::string& path, size_t padding,
+                          FileContents* contents, std::string* err);
 };
 
 /// Interface for accessing the disk.
@@ -82,6 +106,8 @@ struct RealDiskInterface : public DiskInterface {
   TimeStamp Stat(const std::string& path, std::string* err) const override;
   bool IsStatThreadSafe() const override;
   bool IsReadFileThreadSafe() const override { return true; }
+  Status LoadFile(const std::string& path, size_t padding,
+                  FileContents* contents, std::string* err) override;
   bool MakeDir(const std::string& path) override;
   bool WriteFile(const std::string& path, const std::string& contents,
                  bool crlf_on_windows) override;

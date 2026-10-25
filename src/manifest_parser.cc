@@ -707,7 +707,7 @@ struct PendingDefault {
 struct ParsedFile {
   std::string filename;
   /// The contents of the file, NUL-terminated and padded.
-  std::string input;
+  FileContents contents;
   /// The text of the file: input.data(), or the text of the file that this
   /// is a chunk of.
   const char* text = nullptr;
@@ -777,10 +777,11 @@ ptrdiff_t LastDefinitionIn(const char* text, const char* begin,
   while (line < end) {
     if (MayStartDefinition(line))
       last = line - text;
-    line = static_cast<const char*>(memchr(line, '\n', end - line));
-    if (!line)
+    // The text is NUL-terminated and padded.
+    const char* newline = FindFirstOf<'\n', '\0'>(line);
+    if (*newline != '\n')
       break;
-    ++line;
+    line = newline + 1;
   }
   return last;
 }
@@ -839,8 +840,9 @@ bool LoadAndProcessFile(ParseContext* ctx, ParsedFile* parent,
                         const char* pos, ParsedFile* file, BindingEnv* env,
                         bool frozen) {
   std::string read_err;
-  if (ctx->file_reader->ReadFile(file->filename, &file->input, &read_err) !=
-      FileReader::Okay) {
+  if (ctx->file_reader->LoadFile(file->filename, kCharScanPadding + 1,
+                                 &file->contents,
+                                 &read_err) != FileReader::Okay) {
     // Errors loading the file are reported in the context of the parent.
     file->AddError(FormatError(parent->filename, parent->text, pos,
                                "loading '" + file->filename + "': " +
@@ -962,10 +964,9 @@ struct FileProcessor {
 bool ProcessFile(ParseContext* ctx, ParsedFile* file, BindingEnv* env,
                  bool frozen) {
   if (!file->text) {
-    // Pad the input for the lexer.
-    file->size = file->input.size();
-    file->input.append(kCharScanPadding + 1, '\0');
-    file->text = file->input.data();
+    // FileReader::LoadFile() padded the contents for the lexer.
+    file->text = file->contents.data;
+    file->size = file->contents.size;
   }
   FileProcessor processor(ctx, file, env, frozen);
   bool ok = processor.Run();
@@ -1763,17 +1764,44 @@ std::string ManifestParser::LookupVariable(const std::string& varname) {
   return env_->LookupVariable(varname);
 }
 
+bool ManifestParser::Load(const string& filename, string* err) {
+  METRIC_RECORD(".ninja parse");
+  std::unique_ptr<ParsedFile> root(new ParsedFile);
+  root->filename = filename;
+  string read_err;
+  if (file_reader_->LoadFile(filename, kCharScanPadding + 1, &root->contents,
+                             &read_err) != FileReader::Okay) {
+    *err = "loading '" + filename + "': " + read_err;
+    return false;
+  }
+  return ParseRoot(root.release(), err);
+}
+
 bool ManifestParser::Parse(const string& filename, const string& input,
                            string* err) {
+  string contents = input;
+  return ParseContents(filename, &contents, err);
+}
+
+bool ManifestParser::ParseContents(const string& filename, string* contents,
+                                   string* err) {
+  std::unique_ptr<ParsedFile> root(new ParsedFile);
+  root->filename = filename;
+  root->contents.storage.swap(*contents);
+  root->contents.size = root->contents.storage.size();
+  root->contents.storage.append(kCharScanPadding + 1, '\0');
+  root->contents.data = root->contents.storage.data();
+  return ParseRoot(root.release(), err);
+}
+
+bool ManifestParser::ParseRoot(void* root_file, string* err) {
   ParseContext ctx;
   ctx.state = state_;
   ctx.file_reader = file_reader_;
   ctx.parallel = file_reader_ && file_reader_->IsReadFileThreadSafe() &&
                  TaskGroup::Concurrency() > 1;
 
-  std::unique_ptr<ParsedFile> root(new ParsedFile);
-  root->filename = filename;
-  root->input = input;
+  std::unique_ptr<ParsedFile> root(static_cast<ParsedFile*>(root_file));
   ProcessFile(&ctx, root.get(), env_, true);
   if (options_.top_level_scope_done_)
     options_.top_level_scope_done_();
