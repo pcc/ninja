@@ -27,6 +27,29 @@ void CanonicalizePath(string* path) {
 
 }  // namespace
 
+TEST(CanonicalizePath, AlreadyCanonicalOrNot) {
+  // Paths that are canonical are left alone, but paths that only look so at
+  // first sight are not.
+  string path = "../../foo/bar.h";
+  CanonicalizePath(&path);
+  EXPECT_EQ("../../foo/bar.h", path);
+  path = "/usr/include/.hidden/x.h";
+  CanonicalizePath(&path);
+  EXPECT_EQ("/usr/include/.hidden/x.h", path);
+  path = "..//foo";
+  CanonicalizePath(&path);
+  EXPECT_EQ("../foo", path);
+  path = "../.foo";
+  CanonicalizePath(&path);
+  EXPECT_EQ("../.foo", path);
+  path = "../../foo/./bar";
+  CanonicalizePath(&path);
+  EXPECT_EQ("../../foo/bar", path);
+  path = "foo/bar/";
+  CanonicalizePath(&path);
+  EXPECT_EQ("foo/bar", path);
+}
+
 TEST(CanonicalizePath, PathSamples) {
   string path;
 

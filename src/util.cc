@@ -60,6 +60,7 @@
 #include <sys/cpuset.h>
 #endif
 
+#include "char_scan.h"
 #include "edit_distance.h"
 
 using namespace std;
@@ -138,12 +139,65 @@ static bool IsPathSeparator(char c) {
 #endif
 }
 
+#ifndef _WIN32
+/// Whether CanonicalizePath() would leave the path unchanged, which is the
+/// common case (the check is conservative).
+static inline bool IsCanonicalPath(const char* path, size_t len) {
+  if (path[len - 1] == '/')
+    return false;
+  size_t i = 0;
+  while (i + 3 <= len && path[i] == '.' && path[i + 1] == '.' &&
+         path[i + 2] == '/')
+    i += 3;
+  // "." or ".." components (or names starting with '.'), or an empty
+  // component after "../".
+  if (path[i] == '.' || (i > 0 && path[i] == '/'))
+    return false;
+  // Look for "//" or "/.", 16 positions at a time.
+#if defined(NINJA_CHAR_SCAN_NEON)
+  for (; i + 17 <= len; i += 16) {
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(path + i);
+    uint8x16_t c0 = vld1q_u8(p), c1 = vld1q_u8(p + 1);
+    uint8x16_t m = vandq_u8(
+        vceqq_u8(c0, vdupq_n_u8('/')),
+        vorrq_u8(vceqq_u8(c1, vdupq_n_u8('/')), vceqq_u8(c1, vdupq_n_u8('.'))));
+    if (vmaxvq_u8(m))
+      return false;
+  }
+#elif defined(NINJA_CHAR_SCAN_SSE2)
+  for (; i + 17 <= len; i += 16) {
+    __m128i c0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(path + i));
+    __m128i c1 =
+        _mm_loadu_si128(reinterpret_cast<const __m128i*>(path + i + 1));
+    __m128i m = _mm_and_si128(
+        _mm_cmpeq_epi8(c0, _mm_set1_epi8('/')),
+        _mm_or_si128(_mm_cmpeq_epi8(c1, _mm_set1_epi8('/')),
+                     _mm_cmpeq_epi8(c1, _mm_set1_epi8('.'))));
+    if (_mm_movemask_epi8(m))
+      return false;
+  }
+#endif
+  for (; i + 1 < len; ++i) {
+    if (path[i] == '/' && (path[i + 1] == '/' || path[i + 1] == '.'))
+      return false;
+  }
+  return true;
+}
+#endif
+
 void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
   // WARNING: this function is performance-critical; please benchmark
   // any changes you make to it.
   if (*len == 0) {
     return;
   }
+
+#ifndef _WIN32
+  if (IsCanonicalPath(path, *len)) {
+    *slash_bits = 0;
+    return;
+  }
+#endif
 
   char* start = path;
   char* dst = start;
