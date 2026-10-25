@@ -29,6 +29,13 @@ struct Rule;
 struct Env {
   virtual ~Env() {}
   virtual std::string LookupVariable(StringPiece var) = 0;
+
+  /// Append the value of \a var to \a out.  Equivalent to appending the
+  /// result of LookupVariable(), but implementations can avoid creating
+  /// temporary strings.
+  virtual void AppendVariable(StringPiece var, std::string* out) {
+    out->append(LookupVariable(var));
+  }
 };
 
 /// A tokenized string that contains variable references.
@@ -37,6 +44,9 @@ struct EvalString {
   /// @return The evaluated string with variable expanded using value found in
   ///         environment @a env.
   std::string Evaluate(Env* env) const;
+
+  /// Like Evaluate(), but appends the result to \a out.
+  void EvaluateInto(Env* env, std::string* out) const;
 
   /// @return The string with variables not expanded.
   std::string Unparse() const;
@@ -96,7 +106,8 @@ struct BindingEnv : public Env {
   explicit BindingEnv(BindingEnv* parent) : parent_(parent) {}
 
   virtual ~BindingEnv() {}
-  virtual std::string LookupVariable(StringPiece var);
+  std::string LookupVariable(StringPiece var) override;
+  void AppendVariable(StringPiece var, std::string* out) override;
 
   void AddRule(std::unique_ptr<const Rule> rule);
   const Rule* LookupRule(StringPiece rule_name);
@@ -113,6 +124,9 @@ struct BindingEnv : public Env {
   /// This function takes as parameters the necessary info to do (2).
   std::string LookupWithFallback(StringPiece var, const EvalString* eval,
                                  Env* env);
+  /// Like LookupWithFallback(), but appends the result to \a out.
+  void AppendWithFallback(StringPiece var, const EvalString* eval, Env* env,
+                          std::string* out);
 
 private:
   std::map<std::string, std::string, StringPieceLess> bindings_;

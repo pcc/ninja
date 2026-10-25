@@ -613,30 +613,40 @@ struct EdgeEnv : public Env {
 
   EdgeEnv(const Edge* const edge, const EscapeKind escape)
       : edge_(edge), escape_in_out_(escape), recursive_(false) {}
-  virtual std::string LookupVariable(StringPiece var);
+  std::string LookupVariable(StringPiece var) override;
+  void AppendVariable(StringPiece var, std::string* out) override;
 
-  /// Given a span of Nodes, construct a list of paths suitable for a command
-  /// line.
-  std::string MakePathList(const Node* const* span, size_t size, char sep) const;
+  /// Given a span of Nodes, append a list of paths suitable for a command
+  /// line to \a out.
+  void AppendPathList(const Node* const* span, size_t size, char sep,
+                      std::string* out) const;
 
  private:
-  std::vector<std::string> lookups_;
+  std::vector<StringPiece> lookups_;
   const Edge* const edge_;
   EscapeKind escape_in_out_;
   bool recursive_;
 };
 
 std::string EdgeEnv::LookupVariable(StringPiece var) {
+  std::string result;
+  AppendVariable(var, &result);
+  return result;
+}
+
+void EdgeEnv::AppendVariable(StringPiece var, std::string* out) {
   if (var == "in" || var == "in_newline") {
     int explicit_deps_count =
         static_cast<int>(edge_->inputs_.size() - edge_->implicit_deps_ -
                          edge_->order_only_deps_);
-    return MakePathList(edge_->inputs_.data(), explicit_deps_count,
-                        var == "in" ? ' ' : '\n');
+    AppendPathList(edge_->inputs_.data(), explicit_deps_count,
+                   var == "in" ? ' ' : '\n', out);
+    return;
   } else if (var == "out") {
     int explicit_outs_count =
         static_cast<int>(edge_->outputs_.size() - edge_->implicit_outs_);
-    return MakePathList(&edge_->outputs_[0], explicit_outs_count, ' ');
+    AppendPathList(edge_->outputs_.data(), explicit_outs_count, ' ', out);
+    return;
   }
 
   // Technical note about the lookups_ vector.
@@ -673,15 +683,11 @@ std::string EdgeEnv::LookupVariable(StringPiece var) {
   // at all.
   //
   if (recursive_) {
-    auto it = std::find_if(lookups_.begin(),
-                           lookups_.end(),
-                           [var](const std::string& lookup){
-      return var == lookup;
-    });
+    auto it = std::find(lookups_.begin(), lookups_.end(), var);
     if (it != lookups_.end()) {
       std::string cycle;
       for (; it != lookups_.end(); ++it)
-        cycle.append(*it + " -> ");
+        cycle.append(it->AsString() + " -> ");
       cycle.append(var.str_, var.len_);
       Fatal(("cycle in rule variables: " + cycle).c_str());
     }
@@ -691,43 +697,50 @@ std::string EdgeEnv::LookupVariable(StringPiece var) {
   const EvalString* eval = edge_->rule_->GetBinding(var);
   bool record_varname = recursive_ && eval;
   if (record_varname)
-    lookups_.push_back(var.AsString());
+    lookups_.push_back(var);
 
   // In practice, variables defined on rules never use another rule variable.
   // For performance, only start checking for cycles after the first lookup.
   recursive_ = true;
-  std::string result = edge_->env_->LookupWithFallback(var, eval, this);
+  edge_->env_->AppendWithFallback(var, eval, this, out);
   if (record_varname)
     lookups_.pop_back();
-  return result;
 }
 
-std::string EdgeEnv::MakePathList(const Node* const* const span,
-                                  const size_t size, const char sep) const {
-  string result;
+void EdgeEnv::AppendPathList(const Node* const* const span, const size_t size,
+                             const char sep, std::string* out) const {
   for (const Node* const* i = span; i != span + size; ++i) {
-    if (!result.empty())
-      result.push_back(sep);
+    if (i != span)
+      out->push_back(sep);
+#ifdef _WIN32
     const string& path = (*i)->PathDecanonicalized();
+#else
+    const string& path = (*i)->path();
+#endif
     if (escape_in_out_ == kShellEscape) {
 #ifdef _WIN32
-      GetWin32EscapedString(path, &result);
+      GetWin32EscapedString(path, out);
 #else
-      GetShellEscapedString(path, &result);
+      GetShellEscapedString(path, out);
 #endif
     } else {
-      result.append(path);
+      out->append(path);
     }
   }
-  return result;
 }
 
 std::string Edge::EvaluateCommand(const bool incl_rsp_file) const {
-  string command = GetBinding("command");
+  string command;
+  EdgeEnv env(this, EdgeEnv::kShellEscape);
+  env.AppendVariable("command", &command);
   if (incl_rsp_file) {
-    string rspfile_content = GetBinding("rspfile_content");
-    if (!rspfile_content.empty())
-      command += ";rspfile=" + rspfile_content;
+    size_t command_size = command.size();
+    command += ";rspfile=";
+    size_t prefix_size = command.size();
+    EdgeEnv rsp_env(this, EdgeEnv::kShellEscape);
+    rsp_env.AppendVariable("rspfile_content", &command);
+    if (command.size() == prefix_size)
+      command.resize(command_size);
   }
   return command;
 }
@@ -738,7 +751,10 @@ std::string Edge::GetBinding(StringPiece key) const {
 }
 
 bool Edge::GetBindingBool(StringPiece key) const {
-  return !GetBinding(key).empty();
+  std::string value;
+  EdgeEnv env(this, EdgeEnv::kShellEscape);
+  env.AppendVariable(key, &value);
+  return !value.empty();
 }
 
 string Edge::GetUnescapedDepfile() const {

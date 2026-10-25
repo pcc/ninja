@@ -27,6 +27,16 @@ std::string BindingEnv::LookupVariable(StringPiece var) {
   return "";
 }
 
+void BindingEnv::AppendVariable(StringPiece var, std::string* out) {
+  for (BindingEnv* env = this; env; env = env->parent_) {
+    const auto i = env->bindings_.find(var);
+    if (i != env->bindings_.end()) {
+      out->append(i->second);
+      return;
+    }
+  }
+}
+
 void BindingEnv::AddBinding(const std::string& key, StringPiece val) {
   bindings_[key].assign(val.begin(), val.end());
 }
@@ -108,19 +118,45 @@ std::string BindingEnv::LookupWithFallback(StringPiece var,
   return "";
 }
 
+void BindingEnv::AppendWithFallback(StringPiece var, const EvalString* eval,
+                                    Env* env, std::string* out) {
+  const auto i = bindings_.find(var);
+  if (i != bindings_.end()) {
+    out->append(i->second);
+    return;
+  }
+
+  if (eval) {
+    eval->EvaluateInto(env, out);
+    return;
+  }
+
+  if (parent_)
+    parent_->AppendVariable(var, out);
+}
+
 string EvalString::Evaluate(Env* env) const {
   if (parsed_.empty()) {
     return single_token_;
   }
 
   string result;
+  EvaluateInto(env, &result);
+  return result;
+}
+
+void EvalString::EvaluateInto(Env* env, std::string* out) const {
+  if (parsed_.empty()) {
+    out->append(single_token_);
+    return;
+  }
+
   for (TokenList::const_iterator i = parsed_.begin(); i != parsed_.end(); ++i) {
     if (i->second == RAW)
-      result.append(i->first);
+      out->append(i->first);
     else
-      result.append(env->LookupVariable(i->first));
+      env->AppendVariable(i->first, out);
   }
-  return result;
 }
 
 void EvalString::AddText(StringPiece text) {

@@ -318,21 +318,22 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
 #endif
 }
 
-static inline bool IsKnownShellSafeCharacter(char ch) {
-  if ('A' <= ch && ch <= 'Z') return true;
-  if ('a' <= ch && ch <= 'z') return true;
-  if ('0' <= ch && ch <= '9') return true;
-
-  switch (ch) {
-    case '_':
-    case '+':
-    case '-':
-    case '.':
-    case '/':
-      return true;
-    default:
-      return false;
+namespace {
+struct ShellSafeCharacterTable {
+  bool safe[256] = {};
+  constexpr ShellSafeCharacterTable() {
+    for (int ch = 'A'; ch <= 'Z'; ++ch) safe[ch] = true;
+    for (int ch = 'a'; ch <= 'z'; ++ch) safe[ch] = true;
+    for (int ch = '0'; ch <= '9'; ++ch) safe[ch] = true;
+    for (char ch : { '_', '+', '-', '.', '/' })
+      safe[static_cast<unsigned char>(ch)] = true;
   }
+};
+constexpr ShellSafeCharacterTable kShellSafeCharacters;
+}  // namespace
+
+static inline bool IsKnownShellSafeCharacter(char ch) {
+  return kShellSafeCharacters.safe[static_cast<unsigned char>(ch)];
 }
 
 static inline bool IsKnownWin32SafeCharacter(char ch) {
