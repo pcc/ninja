@@ -42,6 +42,9 @@ Tools live in `misc/bench/`:
   spawn `/bin/sh -c fakecc` directly, i.e. the floor for any ninja.
 - `bench.py` – driver: `setup` (generate + full build), `rebuild` (redo the
   full build, e.g. after a log format change), `run`.
+- `equivalence.py` – checks that a binary decides the same as a reference
+  (e.g. upstream ninja, built from 3ccb227) under a few changes to the tree:
+  `ninja -n` output must match (it rebuilds the tree afterwards).
 - `compare.py` – A/B comparison of two binaries, interleaved (A B A B ...)
   in batches of 5 runs; `--cpu` compares the CPU time of `ninja -n` runs,
   which is steadier when the machine is short of cores.
