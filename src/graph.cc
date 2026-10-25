@@ -109,8 +109,14 @@ class RecomputeOutputsDirtyCache {
  public:
   RecomputeOutputsDirtyCache(BuildLog* build_log,
                              OptionalExplanations& explanations, Edge* edge)
-      : buildLog_(build_log), explanations_(explanations), edge_(edge),
-        logEntry_(edge->outputs_.size()) {
+      : buildLog_(build_log), explanations_(explanations), edge_(edge) {
+    // Edges usually have one output: avoid allocating for those.
+    if (edge->outputs_.size() <= kInlineEntries) {
+      logEntry_ = inline_entries_;
+    } else {
+      heap_entries_.reset(new CachedLogEntry[edge->outputs_.size()]);
+      logEntry_ = heap_entries_.get();
+    }
     if (BuildLog::LogEntry* entry =
             edge->scan_bindings_.valid
                 ? edge->scan_bindings_.first_output_log_entry
@@ -160,7 +166,11 @@ class RecomputeOutputsDirtyCache {
                              : edge_->GetBindingBool("restat");
   bool generator_ = false;
   bool generatorValid_ = false;
-  std::vector<CachedLogEntry> logEntry_;
+  static const size_t kInlineEntries = 2;
+  CachedLogEntry inline_entries_[kInlineEntries];
+  std::unique_ptr<CachedLogEntry[]> heap_entries_;
+  /// The entries for the outputs.
+  CachedLogEntry* logEntry_;
   LazyEdgeCommandHash commandHash_ = LazyEdgeCommandHash(edge_);
 
 #ifndef NDEBUG
@@ -639,6 +649,10 @@ bool DependencyScan::RecomputeEdgesInputsDirty(
   // Newly encountered edges may load dyndep files and gain
   // outputs that correspond to some of our inputs.
   for (auto i : input_range) {
+    // (Skip the call for inputs that were visited already, which is most.)
+    Edge* in_edge = i->in_edge();
+    if (in_edge ? in_edge->mark_ == Edge::VisitDone : i->status_known())
+      continue;
     if (!RecomputeNodeDirty(i, stack, validation_nodes, err))
       return false;
   }

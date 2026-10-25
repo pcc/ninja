@@ -224,6 +224,7 @@ don't compare exactly.
 | static linking (CMake, Linux)  |    83 |     43 |
 | simple commands without /bin/sh|    70 |     35 |
 | 256 node map shards            |    73 |   34.9 |
+| leaner serial scan loop        |    65 |   34.6 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):
