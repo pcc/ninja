@@ -468,20 +468,33 @@ int ReadFile(const string& path, string* contents, string* err) {
     return -errno;
   }
 
-  // +1 is for the resize in ManifestParser::Load
-  contents->reserve(st.st_size + 1);
-
-  char buf[64 << 10];
-  size_t len;
-  while (!feof(f) && (len = fread(buf, 1, sizeof(buf), f)) > 0) {
-    contents->append(buf, len);
+  // Read directly into the string.  Leave some room for callers that
+  // append to the contents (the manifest parser appends padding), and read
+  // one more byte than expected to see the end of the file in one read.
+  size_t used = contents->size();
+  size_t capacity = used + st.st_size + 1;
+  contents->reserve(capacity + 64);
+  contents->resize(capacity);
+  for (;;) {
+    if (used == capacity) {
+      capacity += 64 << 10;
+      contents->resize(capacity);
+    }
+    ssize_t len = read(fileno(f), &(*contents)[used], capacity - used);
+    if (len < 0) {
+      if (errno == EINTR)
+        continue;
+      int read_errno = errno;
+      err->assign(strerror(read_errno));
+      contents->clear();
+      fclose(f);
+      return -read_errno;
+    }
+    if (len == 0)
+      break;
+    used += len;
   }
-  if (ferror(f)) {
-    err->assign(strerror(errno));  // XXX errno?
-    contents->clear();
-    fclose(f);
-    return -errno;
-  }
+  contents->resize(used);
   fclose(f);
   return 0;
 #endif
