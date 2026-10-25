@@ -201,7 +201,9 @@ deps log's id assignment, and a parallel bottom-up dirty scan (synchronizing
 the ~480k edge-to-edge dependencies, mostly order-only, costs more than the
 serial scan), and letting the prefetch's edges pass continue on other
 threads while the serial scan starts (claiming the edges it needs: it
-then does much of that work itself, in its order; +1 ms).
+then does much of that work itself, in its order; +1 ms), and creating
+nodes in batches by node map shard (+4 ms: the grouping costs more than
+the locks it saves).
 
 ## Pitfalls found so far
 
