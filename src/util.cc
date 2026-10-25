@@ -142,7 +142,7 @@ static bool IsPathSeparator(char c) {
 #ifndef _WIN32
 /// Whether CanonicalizePath() would leave the path unchanged, which is the
 /// common case (the check is conservative).
-static inline bool IsCanonicalPath(const char* path, size_t len) {
+static inline bool IsCanonicalPathImpl(const char* path, size_t len) {
   if (path[len - 1] == '/')
     return false;
   size_t i = 0;
@@ -185,6 +185,14 @@ static inline bool IsCanonicalPath(const char* path, size_t len) {
 }
 #endif
 
+bool IsCanonicalPath(const char* path, size_t len) {
+#ifdef _WIN32
+  return false;
+#else
+  return len == 0 || IsCanonicalPathImpl(path, len);
+#endif
+}
+
 void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
   // WARNING: this function is performance-critical; please benchmark
   // any changes you make to it.
@@ -193,7 +201,7 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
   }
 
 #ifndef _WIN32
-  if (IsCanonicalPath(path, *len)) {
+  if (IsCanonicalPathImpl(path, *len)) {
     *slash_bits = 0;
     return;
   }

@@ -885,6 +885,16 @@ struct FileProcessor {
   /// (if \a with_node).
   PathRef EvaluatePath(const RawString& raw, Env* env, bool with_node) {
     PathRef path;
+    path.slash_bits = 0;
+    path.node = nullptr;
+    if (raw.literal && IsCanonicalPath(raw.begin, raw.end - raw.begin)) {
+      // The path can stay in the input.
+      path.str = raw.begin;
+      path.len = raw.end - raw.begin;
+      if (path.len && with_node)
+        path.node = GetNode(path);
+      return path;
+    }
     if (raw.literal) {
       path.len = raw.end - raw.begin;
       char* str = file_->arena.Allocate(path.len);
@@ -898,8 +908,6 @@ struct FileProcessor {
       memcpy(str, scratch_.data(), path.len);
       path.str = str;
     }
-    path.slash_bits = 0;
-    path.node = nullptr;
     if (path.len) {
       CanonicalizePath(const_cast<char*>(path.str), &path.len,
                        &path.slash_bits);

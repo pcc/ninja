@@ -171,6 +171,7 @@ don't compare exactly.
 | load deps log while parsing    |   118 |     71 |
 | (chunks, mapped manifests)     |   121 |     72 |
 | bindings as views, flat envs   |   115 |     70 |
+| canonical paths not copied     |   111 |     69 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):
