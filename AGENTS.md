@@ -58,6 +58,10 @@ representative of a local disk with a warm page cache.
 If the log formats change, run `bench.py rebuild` with the new binary before
 measuring it.
 
+The CMake build links ninja statically on Linux when it can (NINJA_STATIC;
+needs `dnf install glibc-static libstdc++-static`, done on both machines):
+that saves 2-4 ms of process startup.
+
 Machines used:
 - arm64: this VM, Apple M2 Max, 12 vCPUs, 16 GB RAM.
 - x86-64: `ssh x86` companion VM, AMD EPYC, 16 vCPUs, 16 GB RAM. Copy the
@@ -207,6 +211,7 @@ don't compare exactly.
 | parallel edge collection       |    85 |   48.6 |
 | early stats on all threads     |    87 |     47 |
 | fast path for deps summaries   |    86 |     46 |
+| static linking (CMake, Linux)  |    83 |     43 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):

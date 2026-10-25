@@ -218,6 +218,21 @@ if(NINJA_BUILD_BINARY)
     target_sources(ninja PRIVATE windows/ninja.manifest)
   endif()
 
+  # A statically linked ninja starts faster (there are no shared libraries
+  # to load and relocate), which shows in builds with little to do.
+  option(NINJA_STATIC "Link the ninja binary statically, if possible" ON)
+  if(NINJA_STATIC AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_LINK_OPTIONS -static)
+    check_cxx_source_compiles("
+      #include <thread>
+      int main() { std::thread t([] {}); t.join(); }" NINJA_CAN_LINK_STATIC)
+    unset(CMAKE_REQUIRED_LINK_OPTIONS)
+    if(NINJA_CAN_LINK_STATIC)
+      target_link_options(ninja PRIVATE -static)
+    endif()
+  endif()
+
   option(NINJA_CLANG_TIDY "Run clang-tidy on source files" OFF)
   if(NINJA_CLANG_TIDY)
     set_target_properties(libninja-re2c libninja ninja PROPERTIES CXX_CLANG_TIDY "clang-tidy;--use-color")
