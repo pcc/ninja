@@ -206,6 +206,7 @@ don't compare exactly.
 | ParallelFor waits, doesn't steal |    79 |     49 |
 | parallel edge collection       |    85 |   48.6 |
 | early stats on all threads     |    87 |     47 |
+| fast path for deps summaries   |    86 |     46 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):

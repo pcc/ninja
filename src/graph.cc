@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <deque>
+#include <limits>
 #include <optional>
 #include <assert.h>
 #include <stdio.h>
@@ -475,6 +476,20 @@ void DependencyScan::Prefetch(Node* initial_node) {
         stat_id(static_cast<int>(id));
     });
   }
+  // Then each id's mtime, or kFlagged if it isn't a leaf that was stat()ed
+  // and is clean: the summaries take the slow path for those.
+  const TimeStamp kFlagged = std::numeric_limits<TimeStamp>::max();
+  std::unique_ptr<TimeStamp[]> id_ranks;
+  if (all_ids_done) {
+    id_ranks.reset(new TimeStamp[id_count]);
+    ParallelFor(id_count, 4096, [&](size_t begin, size_t end) {
+      for (size_t id = begin; id < end; ++id) {
+        uint8_t s = id_states[id].load(std::memory_order_relaxed);
+        id_ranks[id] =
+            s & (kNonLeaf | kStatFailed | kDirty) ? kFlagged : id_mtimes[id];
+      }
+    });
+  }
   const int epoch = dyndep_epoch_;
 
   ParallelFor(edges.size(), 16, [&](size_t begin, size_t end) {
@@ -501,9 +516,27 @@ void DependencyScan::Prefetch(Node* initial_node) {
           summary.leaf_dirty = false;
           summary.leaf_most_recent = nullptr;
           summary.non_leaf.clear();
+          bool summarized = false;
+          if (all_ids_done) {
+            // The usual case: all deps are clean leaves.
+            TimeStamp best = -1;
+            int best_j = -1;
+            for (int j = 0; j < deps->node_count; ++j) {
+              TimeStamp rank = id_ranks[deps->nodes.ids[j]];
+              if (rank > best) {
+                best = rank;
+                best_j = j;
+              }
+            }
+            if (best != kFlagged) {
+              if (best_j >= 0)
+                summary.leaf_most_recent = deps->nodes[best_j];
+              summarized = true;
+            }
+          }
           int most_recent = -1;
           TimeStamp most_recent_mtime = 0;
-          for (int j = 0; j < deps->node_count; ++j) {
+          for (int j = 0; j < deps->node_count && !summarized; ++j) {
             int id = deps->nodes.ids[j];
             // All ids are done if all_ids_done, and the ParallelFor()
             // synchronized with the threads that did them.
