@@ -182,7 +182,10 @@ printed at those points, and phases of CPU time from `perf record -g` of
 
 Tried without gain (or worse): starting the early stats right after reading
 the deps log (they compete with the loads), urgent ParallelFor helpers,
-spinning thread-pool workers, io_uring statx (much more CPU), MAP_POPULATE
+spinning thread-pool workers, io_uring statx (much more CPU), stat()ing
+relative to cached directory handles (x86-64: -7% CPU but at best -0.8 ms
+with 3000 handles, which needs a higher RLIMIT_NOFILE; nothing on arm64),
+MAP_POPULATE
 or THP for node/edge blocks, a smaller memory footprint (BindingEnv rules
 out of line, 16-byte deps-log records, depfile views), parallelizing the
 deps log's id assignment, and a parallel bottom-up dirty scan (synchronizing
