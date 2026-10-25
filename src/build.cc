@@ -497,7 +497,7 @@ void Plan::ComputeCriticalPath() {
   struct TopoSort {
     void VisitTarget(const Node* target) {
       Edge* producer = target->in_edge();
-      if (producer)
+      if (producer && !producer->outputs_ready())
         Visit(producer);
     }
 
@@ -517,6 +517,12 @@ void Plan::ComputeCriticalPath() {
     //   are not necessary, and a simple set is used to record
     //   which edges have already been visited.
     //
+    // - Edges whose outputs are ready are skipped. They are never
+    //   scheduled, and neither is anything below them (an edge is only
+    //   ready if all of its inputs are), so their weights don't matter.
+    //   This avoids walking the whole (mostly clean) graph, including
+    //   all of the inputs loaded from the deps log.
+    //
     void Visit(Edge* edge) {
       auto insertion = visited_set_.emplace(edge);
       if (!insertion.second)
@@ -524,7 +530,7 @@ void Plan::ComputeCriticalPath() {
 
       for (const Node* input : edge->inputs_) {
         Edge* producer = input->in_edge();
-        if (producer)
+        if (producer && !producer->outputs_ready())
           Visit(producer);
       }
       sorted_edges_.push_back(edge);
@@ -555,7 +561,7 @@ void Plan::ComputeCriticalPath() {
 
     for (const Node* input : edge->inputs_) {
       Edge* producer = input->in_edge();
-      if (!producer)
+      if (!producer || producer->outputs_ready())
         continue;
 
       int64_t producer_weight = producer->critical_path_weight();
