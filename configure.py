@@ -385,7 +385,8 @@ else:
         pass
     if platform.is_mingw():
         cflags += ['-D_WIN32_WINNT=0x0601', '-D__USE_MINGW_ANSI_STDIO=1']
-    ldflags = ['-L$builddir']
+    cflags.append('-pthread')
+    ldflags = ['-L$builddir', '-pthread']
     if platform.uses_usr_local():
         cflags.append('-I/usr/local/include')
         ldflags.append('-L/usr/local/lib')
@@ -561,6 +562,7 @@ for name in ['build',
              'state',
              'status_printer',
              'string_piece_util',
+             'thread_pool',
              'util',
              'version']:
     objs += cxx(name, variables=cxxvariables)

@@ -47,6 +47,9 @@ struct DiskInterface: public FileReader {
   /// other errors.
   virtual TimeStamp Stat(const std::string& path, std::string* err) const = 0;
 
+  /// Whether Stat() may be called from several threads at once.
+  virtual bool IsStatThreadSafe() const { return false; }
+
   /// Create a directory, returning false on failure.
   virtual bool MakeDir(const std::string& path) = 0;
 
@@ -74,6 +77,7 @@ struct RealDiskInterface : public DiskInterface {
   RealDiskInterface();
   virtual ~RealDiskInterface() {}
   TimeStamp Stat(const std::string& path, std::string* err) const override;
+  bool IsStatThreadSafe() const override;
   bool MakeDir(const std::string& path) override;
   bool WriteFile(const std::string& path, const std::string& contents,
                  bool crlf_on_windows) override;

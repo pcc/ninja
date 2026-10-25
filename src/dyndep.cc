@@ -83,8 +83,10 @@ bool DyndepLoader::UpdateEdge(Edge* edge, Dyndeps const* dyndeps,
   // Add dyndep-discovered bindings to the edge.
   // We know the edge already has its own binding
   // scope because it has a "dyndep" binding.
-  if (dyndeps->restat_)
+  if (dyndeps->restat_) {
     edge->env_->AddBinding("restat", "1");
+    edge->scan_bindings_.restat = true;
+  }
 
   // Add the dyndep-discovered outputs to the edge.
   edge->outputs_.insert(edge->outputs_.end(),

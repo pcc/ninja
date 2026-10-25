@@ -151,6 +151,7 @@ add_library(libninja OBJECT
   src/state.cc
   src/status_printer.cc
   src/string_piece_util.cc
+  src/thread_pool.cc
   src/util.cc
   src/version.cc
 )
@@ -191,6 +192,9 @@ if("src/getopt.c" IN_LIST _src_ninja)
 endif()
 
 target_compile_features(libninja PUBLIC cxx_std_17)
+
+find_package(Threads REQUIRED)
+target_link_libraries(libninja PUBLIC Threads::Threads)
 target_compile_features(libninja-re2c PUBLIC cxx_std_17)
 
 #Fixes GetActiveProcessorCount on MinGW

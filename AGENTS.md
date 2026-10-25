@@ -47,6 +47,9 @@ Usage:
     misc/bench/bench.py setup --ninja build/ninja /mnt/tb/bench
     misc/bench/bench.py run -n 10 --ninja build/ninja /mnt/tb/bench
 
+Unit tests: `./build/ninja_test`; end-to-end: `ln -s build/ninja ninja &&
+python3 misc/output_test.py` (needs `script`, from util-linux-script).
+
 Put the tree on a tmpfs (`mount -t tmpfs -o size=2500m tmpfs /mnt/tb`): the
 VM's rootfs is virtiofs, where stat() is slow and very noisy, which is not
 representative of a local disk with a warm page cache.
@@ -76,6 +79,7 @@ don't compare exactly.
 | critical path: skip ready edges|   615 |    596 |
 | no out-edges for leaf deps     |   539 |    517 |
 | append-based evaluation        |   496 |    500 |
+| parallel scan prefetch         |   428 |    329 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

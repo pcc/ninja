@@ -15,6 +15,7 @@
 #ifndef NINJA_METRICS_H_
 #define NINJA_METRICS_H_
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -27,9 +28,11 @@
 struct Metric {
   std::string name;
   /// Number of times we've hit the code path.
-  int count;
+  std::atomic<int> count;
   /// Total time (in platform-dependent units) we've spent on the code path.
-  int64_t sum;
+  /// Code paths that run on several threads at once count the total time
+  /// across threads.
+  std::atomic<int64_t> sum;
 };
 
 /// A scoped object for recording a metric across the body of a function.

@@ -63,11 +63,11 @@ ScopedMetric::ScopedMetric(Metric* metric) {
 ScopedMetric::~ScopedMetric() {
   if (!metric_)
     return;
-  metric_->count++;
+  metric_->count.fetch_add(1, std::memory_order_relaxed);
   // Leave in the timer's natural frequency to avoid paying the conversion cost
   // on every measurement.
   int64_t dt = HighResTimer() - start_;
-  metric_->sum += dt;
+  metric_->sum.fetch_add(dt, std::memory_order_relaxed);
 }
 
 Metric* Metrics::NewMetric(const string& name) {
@@ -95,7 +95,7 @@ void Metrics::Report() {
     double total = micros / (double)1000;
     double avg = micros / (double)metric->count;
     printf("%-*s\t%-6d\t%-8.1f\t%.1f\n", width, metric->name.c_str(),
-           metric->count, avg, total);
+           metric->count.load(), avg, total);
   }
 }
 

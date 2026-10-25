@@ -215,6 +215,14 @@ RealDiskInterface::RealDiskInterface()
 {}
 #endif
 
+bool RealDiskInterface::IsStatThreadSafe() const {
+#ifdef _WIN32
+  return !use_cache_;
+#else
+  return true;
+#endif
+}
+
 TimeStamp RealDiskInterface::Stat(const string& path, string* err) const {
   METRIC_RECORD("node stat");
 #ifdef _WIN32

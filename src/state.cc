@@ -195,6 +195,7 @@ void State::Reset() {
     (*e)->outputs_ready_ = false;
     (*e)->deps_loaded_ = false;
     (*e)->mark_ = Edge::VisitNone;
+    (*e)->scan_bindings_.valid = false;
   }
 }
 

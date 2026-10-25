@@ -1255,3 +1255,163 @@ TEST_F(GraphTest, PhonyOutputWithValidation) {
   ASSERT_EQ(1u, validation_nodes.size());
   EXPECT_EQ("valid", validation_nodes[0]->path());
 }
+
+#ifndef _WIN32
+#include <sys/time.h>
+
+#include "build_log.h"
+#include "deps_log.h"
+#include "disk_interface.h"
+
+namespace {
+
+struct NoDeadPaths : public BuildLogUser {
+  bool IsPathDead(StringPiece) const override { return false; }
+};
+
+void WriteFileWithTime(const std::string& path, time_t mtime) {
+  FILE* f = fopen(path.c_str(), "w");
+  ASSERT_TRUE(f);
+  fclose(f);
+  struct timeval times[2] = { { mtime, 0 }, { mtime, 0 } };
+  ASSERT_EQ(0, utimes(path.c_str(), times));
+}
+
+// The result of a dependency scan, for comparisons.
+std::string DescribeScan(State* state) {
+  std::string result;
+  for (Edge* edge : state->edges_) {
+    result += edge->outputs_[0]->path() + ":";
+    result += edge->outputs_ready() ? " ready" : " not-ready";
+    result += edge->deps_missing_ ? " deps-missing" : "";
+    result += " inputs=" + std::to_string(edge->inputs_.size());
+    for (Node* node : edge->outputs_)
+      result += std::string(" ") + (node->dirty() ? "dirty" : "clean");
+    result += "\n";
+  }
+  return result;
+}
+
+}  // namespace
+
+// DependencyScan::Prefetch() does part of the work of RecomputeDirty() in
+// parallel. It only runs with a DiskInterface that supports concurrent
+// stat() calls, so check on real files that it doesn't change any results.
+TEST(GraphPrefetchTest, MatchesSerialScan) {
+  ScopedTempDir temp_dir;
+  temp_dir.CreateAndEnter("GraphPrefetchTest");
+  RealDiskInterface disk;
+
+  const char kManifest[] =
+      "rule cc\n"
+      "  command = cc $flags -c $in -o $out\n"
+      "  deps = gcc\n"
+      "  depfile = $out.d\n"
+      "rule ar\n"
+      "  command = ar $out @$out.rsp\n"
+      "  rspfile = $out.rsp\n"
+      "  rspfile_content = $in\n"
+      "rule gen\n"
+      "  command = gen $in $out\n"
+      "  restat = 1\n"
+      "rule regen\n"
+      "  command = regen\n"
+      "  generator = 1\n"
+      "build build.ninja: regen gen.in\n"
+      "build clean.o: cc clean.c\n"
+      "build dirty_dep.o: cc dirty_dep.c\n"
+      "build missing_dep.o: cc missing_dep.c\n"
+      "build no_deps.o: cc no_deps.c\n"
+      "build no_log.o: cc no_log.c\n"
+      "build cmd.o: cc cmd.c\n"
+      "  flags = -O2\n"
+      "build gen.h: gen gen.in\n"
+      "build uses_gen.o: cc uses_gen.c || gen.h\n"
+      "build lib.a: ar clean.o dirty_dep.o missing_dep.o no_deps.o no_log.o "
+      "cmd.o uses_gen.o\n"
+      "build all: phony lib.a build.ninja\n";
+  const time_t kOld = 1000000000, kNew = kOld + 100, kNewer = kOld + 200;
+
+  const char* const kSources[] = { "clean.c", "dirty_dep.c", "missing_dep.c",
+                                   "no_deps.c", "no_log.c", "cmd.c",
+                                   "uses_gen.c", "common.h", "gen.in" };
+  for (const char* source : kSources)
+    WriteFileWithTime(source, kOld);
+  WriteFileWithTime("dirty.h", kNewer);
+  WriteFileWithTime("gen.h", kNew);
+  WriteFileWithTime("build.ninja", kNew);
+  const char* const kObjects[] = { "clean.o", "dirty_dep.o", "missing_dep.o",
+                                   "no_deps.o", "no_log.o", "cmd.o",
+                                   "uses_gen.o", "lib.a" };
+  for (const char* object : kObjects)
+    WriteFileWithTime(object, kNew);
+  std::string err;
+  TimeStamp new_mtime = disk.Stat("clean.o", &err);
+
+  // Write the logs from a manifest where cmd.o had other flags.
+  {
+    State state;
+    std::string manifest = kManifest;
+    manifest.replace(manifest.find("-O2"), 3, "-O1");
+    ManifestParser parser(&state, &disk);
+    ASSERT_TRUE(parser.ParseTest(manifest, &err)) << err;
+    BuildLog build_log;
+    NoDeadPaths user;
+    ASSERT_TRUE(build_log.OpenForWrite(".ninja_log", user, &err));
+    DepsLog deps_log;
+    ASSERT_TRUE(deps_log.OpenForWrite(".ninja_deps", &err));
+    for (Edge* edge : state.edges_) {
+      Node* out = edge->outputs_[0];
+      if (out->path() != "no_log.o" && !edge->is_phony())
+        ASSERT_TRUE(build_log.RecordCommand(edge, 0, 1, new_mtime));
+      if (edge->GetBinding("deps").empty() || out->path() == "no_deps.o")
+        continue;
+      std::vector<Node*> deps = { edge->inputs_[0],
+                                  state.GetNode("common.h", 0) };
+      if (out->path() == "dirty_dep.o")
+        deps.push_back(state.GetNode("dirty.h", 0));
+      if (out->path() == "missing_dep.o")
+        deps.push_back(state.GetNode("missing.h", 0));
+      if (out->path() == "uses_gen.o")
+        deps.push_back(state.GetNode("gen.h", 0));
+      ASSERT_TRUE(deps_log.RecordDeps(out, new_mtime, deps));
+    }
+    build_log.Close();
+    deps_log.Close();
+  }
+
+  std::string results[2];
+  for (int prefetch = 0; prefetch < 2; ++prefetch) {
+    State state;
+    ManifestParser parser(&state, &disk);
+    ASSERT_TRUE(parser.ParseTest(kManifest, &err)) << err;
+    BuildLog build_log;
+    DepsLog deps_log;
+    ASSERT_EQ(LOAD_SUCCESS, build_log.Load(".ninja_log", &err)) << err;
+    ASSERT_EQ(LOAD_SUCCESS, deps_log.Load(".ninja_deps", &state, &err)) << err;
+    DependencyScan scan(&state, &build_log, &deps_log, &disk, NULL, NULL);
+    Node* all = state.LookupNode("all");
+    if (prefetch)
+      scan.Prefetch(all);
+    EXPECT_TRUE(scan.RecomputeDirty(all, NULL, &err));
+    EXPECT_EQ("", err);
+    results[prefetch] = DescribeScan(&state);
+  }
+  EXPECT_EQ(
+      "build.ninja: ready inputs=1 clean\n"
+      "clean.o: ready inputs=3 clean\n"
+      "dirty_dep.o: not-ready inputs=4 dirty\n"
+      "missing_dep.o: not-ready inputs=4 dirty\n"
+      "no_deps.o: not-ready deps-missing inputs=1 dirty\n"
+      "no_log.o: not-ready inputs=1 dirty\n"
+      "cmd.o: not-ready inputs=1 dirty\n"
+      "gen.h: ready inputs=1 clean\n"
+      "uses_gen.o: ready inputs=5 clean\n"
+      "lib.a: not-ready inputs=7 dirty\n"
+      "all: not-ready inputs=2 dirty\n",
+      results[0]);
+  EXPECT_EQ(results[0], results[1]);
+
+  temp_dir.Cleanup();
+}
+#endif  // !_WIN32

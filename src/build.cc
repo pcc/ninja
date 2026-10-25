@@ -683,6 +683,7 @@ Node* Builder::AddTarget(const string& name, string* err) {
 
 bool Builder::AddTarget(Node* target, string* err) {
   std::vector<Node*> validation_nodes;
+  scan_.Prefetch(target);
   if (!scan_.RecomputeDirty(target, &validation_nodes, err))
     return false;
 

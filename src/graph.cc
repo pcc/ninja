@@ -28,6 +28,7 @@
 #include "manifest_parser.h"
 #include "metrics.h"
 #include "state.h"
+#include "thread_pool.h"
 #include "util.h"
 
 using namespace std;
@@ -40,6 +41,9 @@ struct LazyEdgeCommandHash {
   std::uint64_t operator()() {
     if (!valid_) {
       valid_ = true;
+      const Edge::ScanBindings& cached = edge_->scan_bindings_;
+      if (cached.valid && cached.command_hash_valid)
+        return command_ = cached.command_hash;
       return command_ = BuildLog::LogEntry::HashCommand(
                  edge_->EvaluateCommand(/*incl_rsp_file=*/true));
     }
@@ -137,7 +141,9 @@ class RecomputeOutputsDirtyCache {
   OptionalExplanations& explanations_;
   const Edge* const edge_;
 
-  const bool isRestat_ = edge_->GetBindingBool("restat");
+  const bool isRestat_ = edge_->scan_bindings_.valid
+                             ? edge_->scan_bindings_.restat
+                             : edge_->GetBindingBool("restat");
   bool generator_ = false;
   bool generatorValid_ = false;
   std::vector<CachedLogEntry> logEntry_;
@@ -253,7 +259,9 @@ bool RecomputeOutputsDirtyCache::RecomputeOutputDirty(
 
   if (buildLog_) {
     IF_FIRSTRUN (!generatorValid_) {
-      generator_ = edge_->GetBindingBool("generator");
+      generator_ = edge_->scan_bindings_.valid
+                       ? edge_->scan_bindings_.generator
+                       : edge_->GetBindingBool("generator");
       generatorValid_ = true;
     }
     if (entry.LookupByOutput(buildLog_, output)) {
@@ -290,6 +298,19 @@ bool RecomputeOutputsDirtyCache::RecomputeOutputDirty(
 
   return false;
 }
+/// Whether the edge has a "deps" binding.
+bool HasDepsBinding(const Edge* edge) {
+  if (edge->scan_bindings_.valid)
+    return edge->scan_bindings_.has_deps;
+  return !edge->GetBinding("deps").empty();
+}
+
+std::string GetUnescapedDepfile(const Edge* edge) {
+  if (edge->scan_bindings_.valid)
+    return edge->scan_bindings_.depfile;
+  return edge->GetUnescapedDepfile();
+}
+
 }  // namespace
 
 bool Node::Stat(DiskInterface* disk_interface, string* err) {
@@ -305,6 +326,85 @@ void Node::UpdatePhonyMtime(TimeStamp mtime) {
   if (!exists()) {
     mtime_ = std::max(mtime_, mtime);
   }
+}
+
+void DependencyScan::Prefetch(Node* initial_node) {
+  // Explanations are recorded while visiting nodes, which the prefetch
+  // would skip.
+  if (explanations_.ptr() || !disk_interface_->IsStatThreadSafe() ||
+      TaskGroup::Concurrency() <= 1)
+    return;
+  METRIC_RECORD("scan prefetch");
+
+  // Collect the edges that RecomputeDirty() will visit, as far as the
+  // manifest tells.
+  std::vector<Edge*> edges;
+  std::vector<Node*> stack(1, initial_node);
+  while (!stack.empty()) {
+    Node* node = stack.back();
+    stack.pop_back();
+    Edge* edge = node->in_edge();
+    if (!edge || edge->mark_ != Edge::VisitNone || edge->scan_bindings_.valid)
+      continue;
+    // Set it early to avoid queueing edges twice; nothing reads it until the
+    // prefetch is done.
+    edge->scan_bindings_.valid = true;
+    edges.push_back(edge);
+    for (Node* input : edge->inputs_)
+      if (input->in_edge())
+        stack.push_back(input);
+    for (Node* validation : edge->validations_)
+      if (validation->in_edge())
+        stack.push_back(validation);
+  }
+
+  // stat() a node, unless another thread does (or did) it.
+  auto stat_node = [this](Node* node) {
+    if (!node->ClaimForPrefetch() || node->status_known())
+      return;
+    std::string err;
+    // On errors, leave the node for RecomputeDirty() to report.
+    if (!node->Stat(disk_interface_, &err))
+      return;
+    // This is what RecomputeNodeDirty() would do on visiting a leaf node,
+    // and it skips visiting nodes whose status is already known.
+    if (!node->in_edge())
+      node->set_dirty(!node->exists());
+  };
+
+  ParallelFor(edges.size(), 16, [&](size_t begin, size_t end) {
+    for (size_t i = begin; i < end; ++i) {
+      Edge* edge = edges[i];
+      Edge::ScanBindings& b = edge->scan_bindings_;
+      b.restat = edge->GetBindingBool("restat");
+      b.generator = edge->GetBindingBool("generator");
+      b.has_deps = !edge->GetBinding("deps").empty();
+      if (!b.has_deps)
+        b.depfile = edge->GetUnescapedDepfile();
+
+      for (Node* output : edge->outputs_)
+        stat_node(output);
+      for (Node* input : edge->inputs_)
+        stat_node(input);
+      if (b.has_deps && deps_log()) {
+        if (DepsLog::Deps* deps = deps_log()->GetDeps(edge->outputs_[0])) {
+          for (int j = 0; j < deps->node_count; ++j)
+            stat_node(deps->nodes[j]);
+        }
+      }
+
+      if (build_log_ && !b.generator && !edge->is_phony()) {
+        for (Node* output : edge->outputs_) {
+          if (build_log_->LookupByOutput(output->path())) {
+            b.command_hash = BuildLog::LogEntry::HashCommand(
+                edge->EvaluateCommand(/*incl_rsp_file=*/true));
+            b.command_hash_valid = true;
+            break;
+          }
+        }
+      }
+    }
+  });
 }
 
 bool DependencyScan::RecomputeDirty(Node* initial_node,
@@ -857,11 +957,10 @@ void Node::Dump(const char* prefix) const {
 
 std::optional<EdgeInputsRange> ImplicitDepLoader::LoadDeps(Edge* edge,
                                                            string* err) {
-  string deps_type = edge->GetBinding("deps");
-  if (!deps_type.empty())
+  if (HasDepsBinding(edge))
     return LoadDepsFromLog(edge, err);
 
-  string depfile = edge->GetUnescapedDepfile();
+  string depfile = GetUnescapedDepfile(edge);
   if (!depfile.empty())
     return LoadDepFile(edge, depfile, err);
 
@@ -870,11 +969,10 @@ std::optional<EdgeInputsRange> ImplicitDepLoader::LoadDeps(Edge* edge,
 }
 
 bool ImplicitDepLoader::LoadDepsTry(const Edge* edge, string* err) const {
-  string deps_type = edge->GetBinding("deps");
-  if (!deps_type.empty())
+  if (HasDepsBinding(edge))
     return LoadDepsFromLogTry(edge, err);
 
-  string depfile = edge->GetUnescapedDepfile();
+  string depfile = GetUnescapedDepfile(edge);
   if (!depfile.empty())
     return LoadDepFileTry(edge, depfile, err);
 

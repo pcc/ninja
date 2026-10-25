@@ -16,6 +16,7 @@
 #define NINJA_GRAPH_H_
 
 #include <algorithm>
+#include <atomic>
 #include <optional>
 #include <queue>
 #include <set>
@@ -63,6 +64,14 @@ struct Node {
     mtime_ = -1;
     exists_ = ExistenceStatusUnknown;
     dirty_ = false;
+    prefetch_claimed_.store(false, std::memory_order_relaxed);
+  }
+
+  /// Claim this node for stat()ing by DependencyScan::Prefetch().  Returns
+  /// true for exactly one caller (until ResetState()).
+  bool ClaimForPrefetch() {
+    return !prefetch_claimed_.load(std::memory_order_relaxed) &&
+           !prefetch_claimed_.exchange(true, std::memory_order_relaxed);
   }
 
   /// Mark the Node as already-stat()ed and missing.
@@ -173,6 +182,9 @@ private:
 
   /// See has_unrecorded_out_edges().
   bool has_unrecorded_out_edges_ = false;
+
+  /// See ClaimForPrefetch().
+  std::atomic<bool> prefetch_claimed_{false};
 
   /// A dense integer id for the node, assigned and used by DepsLog.
   int id_ = -1;
@@ -288,6 +300,22 @@ struct Edge {
   // Historical info: how long did this edge take last time,
   // as per .ninja_log, if known? Defaults to -1 if unknown.
   int64_t prev_elapsed_time_millis = -1;
+
+  /// Values of bindings needed by DependencyScan, computed ahead of time
+  /// (and in parallel) by DependencyScan::Prefetch().
+  struct ScanBindings {
+    bool valid = false;
+    bool restat = false;
+    bool generator = false;
+    /// Whether the "deps" binding is non-empty.
+    bool has_deps = false;
+    /// The unescaped "depfile" binding, if there is no "deps" binding.
+    std::string depfile;
+    /// The hash of EvaluateCommand(true), if command_hash_valid.
+    bool command_hash_valid = false;
+    uint64_t command_hash = 0;
+  };
+  ScanBindings scan_bindings_;
 };
 
 struct EdgeCmp {
@@ -420,6 +448,13 @@ struct DependencyScan {
   /// Appends any validation nodes found to the nodes parameter.
   /// Returns false on failure.
   bool RecomputeDirty(Node* node, std::vector<Node*>* validation_nodes, std::string* err);
+
+  /// Do the expensive but parallelizable parts of RecomputeDirty() for the
+  /// part of the graph that is reachable from \a node through the manifest
+  /// and has not been scanned yet: stat() nodes and evaluate the bindings
+  /// that the scan needs.  Does nothing unless the DiskInterface supports
+  /// concurrent stat() calls.
+  void Prefetch(Node* node);
 
   /// Recompute whether any output of the edge is dirty, if so sets |*dirty|.
   /// Returns false on failure.
