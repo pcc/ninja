@@ -136,7 +136,7 @@ uint64_t PathMap::Hash(StringPiece path) {
 Node* PathMap::Lookup(StringPiece path) const {
   Key key = { path, Hash(path) };
   const Shard& shard = ShardFor(key.hash);
-  std::lock_guard<std::mutex> lock(shard.mutex);
+  std::lock_guard<SpinLock> lock(shard.mutex);
   auto i = shard.map.find(key);
   return i != shard.map.end() ? i->second : NULL;
 }
@@ -145,7 +145,7 @@ Node* PathMap::GetOrCreate(StringPiece path, uint64_t hash,
                            uint64_t slash_bits, bool provisional) {
   Key key = { path, hash };
   Shard& shard = ShardFor(key.hash);
-  std::lock_guard<std::mutex> lock(shard.mutex);
+  std::lock_guard<SpinLock> lock(shard.mutex);
   auto i = shard.map.find(key);
   if (i != shard.map.end())
     return i->second;
@@ -160,7 +160,7 @@ Node* PathMap::GetOrCreate(StringPiece path, uint64_t hash,
 void PathMap::Erase(StringPiece path) {
   Key key = { path, Hash(path) };
   Shard& shard = ShardFor(key.hash);
-  std::lock_guard<std::mutex> lock(shard.mutex);
+  std::lock_guard<SpinLock> lock(shard.mutex);
   shard.map.erase(key);
 }
 

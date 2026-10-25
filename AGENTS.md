@@ -173,6 +173,7 @@ don't compare exactly.
 | bindings as views, flat envs   |   115 |     70 |
 | canonical paths not copied     |   111 |     69 |
 | (small cleanups: log entries, name masks, command buffer) |   111 |     67 |
+| spin locks for the node map    |   107 |     62 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):

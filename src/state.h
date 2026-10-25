@@ -15,8 +15,10 @@
 #ifndef NINJA_STATE_H_
 #define NINJA_STATE_H_
 
+#include <atomic>
 #include <map>
 #include <mutex>
+#include <thread>
 #include <set>
 #include <string>
 #include <vector>
@@ -136,8 +138,25 @@ struct PathMap {
     size_t operator()(const Key& key) const { return key.hash; }
   };
   static const int kShardBits = 6;
+  /// A spin lock: the critical sections are short.  (Yield after a while,
+  /// in case the thread holding it doesn't run.)
+  struct SpinLock {
+    void lock() {
+      int spins = 0;
+      while (locked_.exchange(true, std::memory_order_acquire)) {
+        while (locked_.load(std::memory_order_relaxed)) {
+          if (++spins > 1000)
+            std::this_thread::yield();
+        }
+      }
+    }
+    void unlock() { locked_.store(false, std::memory_order_release); }
+
+   private:
+    std::atomic<bool> locked_{false};
+  };
   struct alignas(64) Shard {
-    mutable std::mutex mutex;
+    mutable SpinLock mutex;
     emhash8::HashMap<Key, Node*, KeyHash> map;
   };
   const Shard& ShardFor(uint64_t hash) const {
