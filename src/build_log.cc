@@ -205,7 +205,8 @@ struct LineReader {
   char* line_end_;
 };
 
-LoadStatus BuildLog::Load(const std::string& path, std::string* err) {
+LoadStatus BuildLog::Load(const std::string& path, std::string* err,
+                          bool may_modify) {
   METRIC_RECORD(".ninja_log load");
   FILE* file = fopen(path.c_str(), "r");
   if (!file) {
@@ -237,6 +238,8 @@ LoadStatus BuildLog::Load(const std::string& path, std::string* err) {
       }
       if (invalid_log_version) {
         fclose(file);
+        if (!may_modify)
+          return LOAD_ERROR;
         platformAwareUnlink(path.c_str());
         // Don't report this as a failure. A missing build log will cause
         // us to rebuild the outputs anyway.

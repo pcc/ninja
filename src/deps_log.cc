@@ -221,95 +221,159 @@ void DepsLog::Close() {
   file_ = NULL;
 }
 
-LoadStatus DepsLog::Load(const string& path, State* state, string* err) {
-  METRIC_RECORD(".ninja_deps load");
-  std::unique_ptr<LoadedFile> file(new LoadedFile);
-  if (!file->Load(path)) {
-    if (errno == ENOENT)
-      return LOAD_NOT_FOUND;
-    *err = strerror(errno);
-    return LOAD_ERROR;
-  }
-  const char* data = file->data();
-  const char* end = data + file->size();
-
-  bool valid_header = file->size() >= kFileSignatureSize &&
-                      !memcmp(data, kFileSignature, kFileSignatureSize);
-
+/// The result of DepsLog::Read().
+struct DepsLog::PendingLoad {
+  std::unique_ptr<LoadedFile> file;
+  /// The errno of loading the file, or 0.
+  int load_errno = 0;
+  bool valid_header = false;
   int32_t version = 0;
-  bool valid_version = false;
-  if (file->size() >= kFileSignatureSize + 4) {
-    memcpy(&version, data + kFileSignatureSize, 4);
-    valid_version = version == kCurrentVersion;
+
+  /// The records that passed the checks that don't need the State.
+  struct Record {
+    const char* data;
+    unsigned size;
+    bool is_deps;
+    /// The offset of the record in the file.
+    long offset;
+  };
+  std::vector<Record> records;
+  /// Whether a record failed the checks, and the end of the last record
+  /// before it.
+  bool read_failed = false;
+  long valid_size = 0;
+};
+
+void DepsLog::PendingLoadDeleter::operator()(PendingLoad* pending) const {
+  delete pending;
+}
+
+DepsLog::PendingLoadPtr DepsLog::Read(const string& path) {
+  PendingLoadPtr pending(new PendingLoad);
+  pending->file.reset(new LoadedFile);
+  if (!pending->file->Load(path)) {
+    pending->load_errno = errno;
+    return pending;
+  }
+  const char* data = pending->file->data();
+  const size_t file_size = pending->file->size();
+  const char* end = data + file_size;
+
+  pending->valid_header = file_size >= kFileSignatureSize &&
+                          !memcmp(data, kFileSignature, kFileSignatureSize);
+  if (file_size >= kFileSignatureSize + 4)
+    memcpy(&pending->version, data + kFileSignatureSize, 4);
+  if (!pending->valid_header || pending->version != kCurrentVersion)
+    return pending;
+
+  // Records are 4-byte aligned, as is the start of the data.
+  const char* p = data + kFileSignatureSize + 4;
+  // The number of path records so far, i.e. the next node id.
+  unsigned path_count = 0;
+  for (;;) {
+    pending->valid_size = p - data;
+    unsigned size;
+    if (end - p < (ptrdiff_t)sizeof(size))
+      break;
+    memcpy(&size, p, sizeof(size));
+    bool is_deps = (size >> 31) != 0;
+    size = size & 0x7FFFFFFF;
+
+    const char* buf = p + sizeof(size);
+    if (size > kMaxRecordSize || end - buf < (ptrdiff_t)size) {
+      pending->read_failed = true;
+      break;
+    }
+
+    if (is_deps) {
+      if ((size % 4) != 0 || size < 12) {
+        pending->read_failed = true;
+        break;
+      }
+      const int* deps_data = reinterpret_cast<const int*>(buf);
+      // A truncated or concurrent write can leave a deps record whose
+      // out_id was never assigned a path. Truncate here; storing it
+      // made Recompact index nodes_ out of bounds.
+      // All ids must refer to paths that precede the record.  (Negative
+      // ids become large as unsigned.)
+      unsigned max_id = static_cast<unsigned>(deps_data[0]);
+      int deps_count = (size / 4) - 3;
+      deps_data += 3;
+      for (int i = 0; i < deps_count; ++i)
+        max_id = std::max(max_id, static_cast<unsigned>(deps_data[i]));
+      if (max_id >= path_count) {
+        pending->read_failed = true;
+        break;
+      }
+    } else {
+      int path_size = size - 4;
+      if (path_size <= 0) {
+        pending->read_failed = true;
+        break;
+      }
+      // Check that the expected index matches the actual index. This can only
+      // happen if two ninja processes write to the same deps log concurrently.
+      // (This uses unary complement to make the checksum look less like a
+      // dependency record entry.)
+      unsigned checksum;
+      memcpy(&checksum, buf + size - 4, 4);
+      if (~checksum != path_count) {
+        pending->read_failed = true;
+        break;
+      }
+      ++path_count;
+    }
+    pending->records.push_back({ buf, size, is_deps, p - data });
+    p = buf + size;
+  }
+  return pending;
+}
+
+LoadStatus DepsLog::Load(const string& path, State* state, string* err) {
+  return Load(Read(path), path, state, err);
+}
+
+LoadStatus DepsLog::Load(PendingLoadPtr pending, const string& path,
+                         State* state, string* err) {
+  METRIC_RECORD(".ninja_deps load");
+  if (pending->load_errno) {
+    if (pending->load_errno == ENOENT)
+      return LOAD_NOT_FOUND;
+    *err = strerror(pending->load_errno);
+    return LOAD_ERROR;
   }
 
   // Note: For version differences, this should migrate to the new format.
   // But the v1 format could sometimes (rarely) end up with invalid data, so
   // don't migrate v1 to v3 to force a rebuild. (v2 only existed for a few days,
   // and there was no release with it, so pretend that it never happened.)
-  if (!valid_header || !valid_version) {
-    if (version == 1)
+  if (!pending->valid_header || pending->version != kCurrentVersion) {
+    if (pending->version == 1)
       *err = "deps log version change; rebuilding";
     else
       *err = "bad deps log signature or version; starting over";
-    file.reset();
+    pending.reset();
     platformAwareUnlink(path.c_str());
     // Don't report this as a failure.  An empty deps log will cause
     // us to rebuild the outputs anyway.
     return LOAD_SUCCESS;
   }
 
-  // Records are 4-byte aligned, as is the start of the data.
-  const char* p = data + kFileSignatureSize + 4;
-  long offset = p - data;
-  bool read_failed = false;
+  bool read_failed = pending->read_failed;
+  long offset = pending->valid_size;
   int unique_dep_record_count = 0;
   int total_dep_record_count = 0;
-  for (;;) {
-    unsigned size;
-    if (end - p < (ptrdiff_t)sizeof(size))
-      break;
-    memcpy(&size, p, sizeof(size));
-    p += sizeof(size);
-    bool is_deps = (size >> 31) != 0;
-    size = size & 0x7FFFFFFF;
-
-    if (size > kMaxRecordSize || end - p < (ptrdiff_t)size) {
-      read_failed = true;
-      break;
-    }
-    const char* buf = p;
-    p += size;
-
-    if (is_deps) {
-      if ((size % 4) != 0 || size < 12) {
-        read_failed = true;
-        break;
-      }
+  for (const PendingLoad::Record& record : pending->records) {
+    const char* buf = record.data;
+    unsigned size = record.size;
+    if (record.is_deps) {
       const int* deps_data = reinterpret_cast<const int*>(buf);
       int out_id = deps_data[0];
-      // A truncated or concurrent write can leave a deps record whose
-      // out_id was never assigned a path. Truncate here; storing it
-      // made Recompact index nodes_ out of bounds.
-      if (out_id < 0 || out_id >= (int)nodes_.size()) {
-        read_failed = true;
-        break;
-      }
       TimeStamp mtime;
       mtime = (TimeStamp)(((uint64_t)(unsigned int)deps_data[2] << 32) |
                           (uint64_t)(unsigned int)deps_data[1]);
       deps_data += 3;
       int deps_count = (size / 4) - 3;
-
-      // All ids must refer to paths that precede the record.  (Negative ids
-      // become large as unsigned.)
-      unsigned max_id = 0;
-      for (int i = 0; i < deps_count; ++i)
-        max_id = std::max(max_id, static_cast<unsigned>(deps_data[i]));
-      if (deps_count && max_id >= nodes_.size()) {
-        read_failed = true;
-        break;
-      }
 
       Deps* deps = new Deps(mtime, deps_count, deps_data, &nodes_);
       total_dep_record_count++;
@@ -317,10 +381,6 @@ LoadStatus DepsLog::Load(const string& path, State* state, string* err) {
         ++unique_dep_record_count;
     } else {
       int path_size = size - 4;
-      if (path_size <= 0) {
-        read_failed = true;
-        break;
-      }
       // There can be up to 3 bytes of padding.
       if (buf[path_size - 1] == '\0') --path_size;
       if (buf[path_size - 1] == '\0') --path_size;
@@ -333,24 +393,18 @@ LoadStatus DepsLog::Load(const string& path, State* state, string* err) {
       // (and so need not have its slashes maintained).
       Node* node = state->GetNode(subpath, 0);
 
-      // Check that the expected index matches the actual index. This can only
-      // happen if two ninja processes write to the same deps log concurrently.
-      // (This uses unary complement to make the checksum look less like a
-      // dependency record entry.)
-      unsigned checksum;
-      memcpy(&checksum, buf + size - 4, 4);
-      int expected_id = ~checksum;
-      int id = static_cast<int>(nodes_.size());
-      if (id != expected_id || node->id() >= 0) {
+      // A path can only appear once (this also happens if two ninja
+      // processes write to the same deps log concurrently).
+      if (node->id() >= 0) {
         read_failed = true;
+        offset = record.offset;
         break;
       }
-      node->set_id(id);
+      node->set_id(static_cast<int>(nodes_.size()));
       nodes_.push_back(node);
     }
-    offset += size + sizeof(size);
   }
-  loaded_files_.push_back(std::move(file));
+  loaded_files_.push_back(std::move(pending->file));
 
   if (read_failed) {
     // An error occurred while loading; try to recover by truncating the

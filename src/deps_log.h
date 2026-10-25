@@ -98,6 +98,18 @@ struct DepsLog {
     std::unique_ptr<int[]> owned_ids;
   };
   LoadStatus Load(const std::string& path, State* state, std::string* err);
+
+  /// Load() in two steps: Read() does the part that doesn't involve the
+  /// State and has no side effects, so that it can run concurrently with
+  /// parsing the manifest.
+  struct PendingLoad;
+  struct PendingLoadDeleter {
+    void operator()(PendingLoad* pending) const;
+  };
+  typedef std::unique_ptr<PendingLoad, PendingLoadDeleter> PendingLoadPtr;
+  static PendingLoadPtr Read(const std::string& path);
+  LoadStatus Load(PendingLoadPtr pending, const std::string& path,
+                  State* state, std::string* err);
   Deps* GetDeps(Node* node);
   Node* GetFirstReverseDepsNode(Node* node);
 

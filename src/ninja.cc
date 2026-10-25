@@ -42,6 +42,7 @@
 #include "command_collector.h"
 #include "debug_flags.h"
 #include "deps_log.h"
+#include "thread_pool.h"
 #include "disk_interface.h"
 #include "exit_status.h"
 #include "graph.h"
@@ -158,6 +159,22 @@ struct NinjaMain : public BuildLogUser {
 
   BuildLog build_log_;
   DepsLog deps_log_;
+
+  /// The logs, as loaded on other threads while the manifest is parsed.
+  /// Where the logs are depends on the manifest (builddir), so this
+  /// assumes the default location, and loads them without side effects.
+  struct SpeculativeLogs {
+    BuildLog build_log;
+    LoadStatus build_log_status = LOAD_ERROR;
+    std::string build_log_err;
+    DepsLog::PendingLoadPtr deps_log;
+    TaskGroup tasks;
+  };
+  std::unique_ptr<SpeculativeLogs> speculative_logs_;
+
+  /// Start loading the logs on other threads.  OpenBuildLog() and
+  /// OpenDepsLog() use the results if they apply.
+  void StartLoadingLogs();
 
   /// The type of functions that are the entry points to tools (subcommands).
   typedef int (NinjaMain::*ToolFunc)(const Options*, int, char**);
@@ -1537,13 +1554,36 @@ bool WarningEnable(const string& name, Options* options) {
   }
 }
 
+void NinjaMain::StartLoadingLogs() {
+  speculative_logs_.reset(new SpeculativeLogs);
+  SpeculativeLogs* logs = speculative_logs_.get();
+  logs->tasks.Run([logs] {
+    logs->build_log_status = logs->build_log.Load(
+        ".ninja_log", &logs->build_log_err, /*may_modify=*/false);
+  });
+  logs->tasks.Run([logs] { logs->deps_log = DepsLog::Read(".ninja_deps"); });
+}
+
 bool NinjaMain::OpenBuildLog(bool recompact_only) {
   string log_path = ".ninja_log";
   if (!build_dir_.empty())
     log_path = build_dir_ + "/" + log_path;
 
   string err;
-  const LoadStatus status = build_log_.Load(log_path, &err);
+  LoadStatus status = LOAD_ERROR;
+  bool loaded = false;
+  SpeculativeLogs* logs = speculative_logs_.get();
+  if (logs && build_dir_.empty()) {
+    logs->tasks.Wait();
+    // On errors, load again to report them (or remove the log).
+    if (logs->build_log_status != LOAD_ERROR && logs->build_log_err.empty()) {
+      status = logs->build_log_status;
+      build_log_.TakeLoadedEntries(&logs->build_log);
+      loaded = true;
+    }
+  }
+  if (!loaded)
+    status = build_log_.Load(log_path, &err);
   if (status == LOAD_ERROR) {
     Error("loading build log %s: %s", log_path.c_str(), err.c_str());
     return false;
@@ -1582,7 +1622,15 @@ bool NinjaMain::OpenDepsLog(bool recompact_only) {
     path = build_dir_ + "/" + path;
 
   string err;
-  const LoadStatus status = deps_log_.Load(path, &state_, &err);
+  LoadStatus status;
+  SpeculativeLogs* logs = speculative_logs_.get();
+  if (logs && build_dir_.empty()) {
+    logs->tasks.Wait();
+    status = deps_log_.Load(std::move(logs->deps_log), path, &state_, &err);
+  } else {
+    status = deps_log_.Load(path, &state_, &err);
+  }
+  speculative_logs_.reset();
   if (status == LOAD_ERROR) {
     Error("loading deps log %s: %s", path.c_str(), err.c_str());
     return false;
@@ -1996,6 +2044,8 @@ NORETURN void real_main(int argc, char** argv) {
       parser_opts.phony_cycle_action_ = kPhonyCycleActionError;
     }
     ManifestParser parser(&ninja.state_, &ninja.disk_interface_, parser_opts);
+    if (!options.tool || options.tool->when == Tool::RUN_AFTER_LOGS)
+      ninja.StartLoadingLogs();
     string err;
     if (!parser.Load(options.input_file, &err)) {
       status->Error("%s", err.c_str());

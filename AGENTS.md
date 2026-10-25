@@ -86,6 +86,10 @@ Machines used:
 - `.ninja_deps` is mmap()ed (read on Windows); `DepsLog::Deps::nodes` is
   a view mapping the ids stored in the file through the log's id->Node
   table, so loading doesn't allocate or convert per dependency.
+- The logs are loaded while the manifest is parsed (NinjaMain::
+  StartLoadingLogs), assuming the default location (no builddir) and
+  without side effects; `DepsLog::Read()` is the State-independent half
+  of `DepsLog::Load()`. Anything unusual falls back to a normal load.
 - Leaf nodes loaded as deps don't get out-edges (flagged instead; dyndep
   recovers them if such a node gains an in-edge).
 
@@ -110,6 +114,7 @@ don't compare exactly.
 | new lexer, parallel subninjas  |   327 |    251 |
 | deps log: ids stay in the file |   291 |    209 |
 | summarize leaf deps in prefetch|   215 |    139 |
+| load logs while parsing        |   180 |    127 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

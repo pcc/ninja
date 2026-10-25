@@ -54,8 +54,16 @@ struct BuildLog {
                      TimeStamp mtime = 0);
   void Close();
 
-  /// Load the on-disk log.
-  LoadStatus Load(const std::string& path, std::string* err);
+  /// Load the on-disk log.  If \a may_modify is false, don't remove the
+  /// log if it has an unsupported version: return an error instead.
+  LoadStatus Load(const std::string& path, std::string* err,
+                  bool may_modify = true);
+
+  /// Take the entries loaded by \a other.
+  void TakeLoadedEntries(BuildLog* other) {
+    entries_.swap(other->entries_);
+    needs_recompaction_ = other->needs_recompaction_;
+  }
 
   struct LogEntry {
     std::string output;
