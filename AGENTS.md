@@ -162,6 +162,28 @@ Machines used:
 - Leaf nodes loaded as deps don't get out-edges (flagged instead; dyndep
   recovers them if such a node gains an in-edge).
 
+## Where the time goes now (GN tree)
+
+Until the dirty scan, x86-64 is CPU-bound: ~380 ms of CPU per run (16
+vCPUs, where syscalls and page faults cost more); arm64 uses ~420 ms (12
+vCPUs). About 35-40% of it is the ~133k stat() calls (the floor: ~1 us
+each on x86-64, ~0.6 us on arm64); the rest is loading the
+manifest cache and the logs (node creation, ~27k page faults), and the
+prefetch's deps summaries. Timeline on x86-64 (ms): loads done ~15, the
+deps-log ids are all stat()ed at ~25 (that gates everything), edges pass
+~2.5, serial scan ~3.4, plan ~0.7, then the command starts (~2 ms to
+exec). `tools/tpx.sh` (outside the repo) instruments a copy of the tree
+with timestamps.
+
+Tried without gain (or worse): starting the early stats right after reading
+the deps log (they compete with the loads), urgent ParallelFor helpers,
+spinning thread-pool workers, io_uring statx (much more CPU), MAP_POPULATE
+or THP for node/edge blocks, a smaller memory footprint (BindingEnv rules
+out of line, 16-byte deps-log records, depfile views), parallelizing the
+deps log's id assignment, and a parallel bottom-up dirty scan (synchronizing
+the ~480k edge-to-edge dependencies, mostly order-only, costs more than the
+serial scan).
+
 ## Pitfalls found so far
 
 - glibc grows heaps with an mprotect() per few pages; with many threads
@@ -225,6 +247,7 @@ don't compare exactly.
 | simple commands without /bin/sh|    70 |     35 |
 | 256 node map shards            |    73 |   34.9 |
 | leaner serial scan loop        |    65 |   34.6 |
+| nodes made outside map locks   |    71 |   34.4 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):
