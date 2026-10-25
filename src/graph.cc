@@ -358,14 +358,8 @@ void DependencyScan::Prefetch(Node* initial_node) {
         stack.push_back(validation);
   }
 
-  // stat() a node, unless another thread does (or did) it.
-  auto stat_node = [this](Node* node) {
-    std::atomic<uint8_t>& state = node->prefetch_state();
-    uint8_t expected = Node::kPrefetchNone;
-    if (state.load(std::memory_order_relaxed) != expected ||
-        !state.compare_exchange_strong(expected, Node::kPrefetchClaimed,
-                                       std::memory_order_acquire))
-      return;
+  // stat() a node (if not known yet), on the thread that claimed it.
+  auto stat = [this](Node* node) {
     std::string err;
     // On errors, leave the node for RecomputeDirty() to report.
     if (!node->status_known() && node->Stat(disk_interface_, &err)) {
@@ -374,16 +368,77 @@ void DependencyScan::Prefetch(Node* initial_node) {
       if (!node->in_edge())
         node->set_dirty(!node->exists());
     }
+  };
+
+  // Nodes with an id in the deps log are referenced a lot (as deps of many
+  // edges), so their state is kept in compact arrays indexed by id instead
+  // of in the nodes: a byte that is either kNone, kClaimed or kDone |
+  // flags, and the mtime.
+  enum : uint8_t {
+    kNone = 0,
+    kClaimed = 1,
+    kDone = 0x80,
+    kDirty = 1,
+    kNonLeaf = 2,
+    kStatFailed = 4,
+  };
+  const std::vector<Node*>* id_nodes =
+      deps_log() ? &deps_log()->nodes() : nullptr;
+  const size_t id_count = id_nodes ? id_nodes->size() : 0;
+  std::vector<std::atomic<uint8_t>> id_states(id_count);
+  std::unique_ptr<TimeStamp[]> id_mtimes(new TimeStamp[id_count]);
+  // Return the state of the node with the given id, after stat()ing it if
+  // no other thread does (or did).
+  auto stat_id = [&](int id) {
+    std::atomic<uint8_t>& state = id_states[id];
+    uint8_t s = state.load(std::memory_order_acquire);
+    if (s & kDone)
+      return s;
+    if (s == kNone && state.compare_exchange_strong(
+                          s, kClaimed, std::memory_order_acquire)) {
+      Node* node = (*id_nodes)[id];
+      stat(node);
+      s = kDone;
+      if (node->in_edge())
+        s |= kNonLeaf;
+      if (!node->status_known())
+        s |= kStatFailed;
+      else if (node->dirty())
+        s |= kDirty;
+      id_mtimes[id] = node->mtime();
+      state.store(s, std::memory_order_release);
+      return s;
+    }
+    while (!((s = state.load(std::memory_order_acquire)) & kDone)) {
+    }
+    return s;
+  };
+  auto stat_node = [&](Node* node) {
+    int id = node->id();
+    if (id >= 0 && static_cast<size_t>(id) < id_count) {
+      stat_id(id);
+      return;
+    }
+    std::atomic<uint8_t>& state = node->prefetch_state();
+    uint8_t expected = Node::kPrefetchNone;
+    if (state.load(std::memory_order_relaxed) != expected ||
+        !state.compare_exchange_strong(expected, Node::kPrefetchClaimed,
+                                       std::memory_order_acquire))
+      return;
+    stat(node);
     state.store(Node::kPrefetchDone, std::memory_order_release);
   };
-  // Wait for a node claimed by stat_node() to be done, and return whether
-  // its status is known.
-  auto wait_for_stat = [](Node* node) {
-    while (node->prefetch_state().load(std::memory_order_acquire) !=
-           Node::kPrefetchDone) {
-    }
-    return node->status_known();
-  };
+
+  // If the scan covers most of the graph, it will need most of the nodes in
+  // the deps log: stat() them all first.  Then the summaries of the deps
+  // (below) don't need to synchronize with other threads for each one.
+  const bool all_ids_done = id_count && edges.size() >= state_->edges_.size() / 2;
+  if (all_ids_done) {
+    ParallelFor(id_count, 256, [&](size_t begin, size_t end) {
+      for (size_t id = begin; id < end; ++id)
+        stat_id(static_cast<int>(id));
+    });
+  }
   const int epoch = dyndep_epoch_;
 
   ParallelFor(edges.size(), 16, [&](size_t begin, size_t end) {
@@ -408,20 +463,28 @@ void DependencyScan::Prefetch(Node* initial_node) {
           summary.leaf_dirty = false;
           summary.leaf_most_recent = nullptr;
           summary.non_leaf.clear();
+          int most_recent = -1;
+          TimeStamp most_recent_mtime = 0;
           for (int j = 0; j < deps->node_count; ++j) {
-            Node* node = deps->nodes[j];
-            stat_node(node);
-            if (node->in_edge()) {
-              summary.non_leaf.push_back(node);
-            } else if (!wait_for_stat(node)) {
+            int id = deps->nodes.ids[j];
+            // All ids are done if all_ids_done, and the ParallelFor()
+            // synchronized with the threads that did them.
+            uint8_t s = all_ids_done
+                            ? id_states[id].load(std::memory_order_relaxed)
+                            : stat_id(id);
+            if (s & kNonLeaf) {
+              summary.non_leaf.push_back((*id_nodes)[id]);
+            } else if (s & kStatFailed) {
               summary.valid = false;
-            } else if (node->dirty()) {
+            } else if (s & kDirty) {
               summary.leaf_dirty = true;
-            } else if (!summary.leaf_most_recent ||
-                       node->mtime() > summary.leaf_most_recent->mtime()) {
-              summary.leaf_most_recent = node;
+            } else if (most_recent < 0 || id_mtimes[id] > most_recent_mtime) {
+              most_recent = id;
+              most_recent_mtime = id_mtimes[id];
             }
           }
+          if (most_recent >= 0)
+            summary.leaf_most_recent = (*id_nodes)[most_recent];
         }
       }
 

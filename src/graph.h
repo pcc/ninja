@@ -484,7 +484,7 @@ struct DependencyScan {
                  DiskInterface* disk_interface,
                  DepfileParserOptions const* depfile_parser_options,
                  Explanations* explanations)
-      : build_log_(build_log), disk_interface_(disk_interface),
+      : state_(state), build_log_(build_log), disk_interface_(disk_interface),
         dep_loader_(state, deps_log, disk_interface, depfile_parser_options,
                     explanations),
         dyndep_loader_(state, disk_interface, explanations),
@@ -549,6 +549,7 @@ struct DependencyScan {
 
   void RecordExplanation(const Node* node, const char* fmt, ...);
 
+  State* state_;
   BuildLog* build_log_;
   DiskInterface* disk_interface_;
   ImplicitDepLoader dep_loader_;
