@@ -140,7 +140,7 @@ struct PathMap {
   struct KeyHash {
     size_t operator()(const Key& key) const { return key.hash; }
   };
-  static const int kShardBits = 6;
+  static const int kShardBits = 8;
   /// A spin lock: the critical sections are short.  (Yield after a while,
   /// in case the thread holding it doesn't run.)
   struct SpinLock {

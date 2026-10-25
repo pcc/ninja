@@ -101,7 +101,7 @@ Machines used:
   StartLoadingLogs), assuming the default location (no builddir) and
   without side effects; `DepsLog::Read()` is the State-independent half
   of `DepsLog::Load()`. Anything unusual falls back to a normal load.
-- `State::paths_` is a `PathMap`: sharded (64 shards, mutex each) so nodes
+- `State::paths_` is a `PathMap`: sharded (256 shards, spin lock each) so nodes
   can be created concurrently. Parse tasks create the nodes for their paths
   (with a per-file cache in front), and the deps log creates its nodes while
   the manifest is parsed (after the top-level scope is done, which tells
@@ -223,6 +223,7 @@ don't compare exactly.
 | fast path for deps summaries   |    86 |     46 |
 | static linking (CMake, Linux)  |    83 |     43 |
 | simple commands without /bin/sh|    70 |     35 |
+| 256 node map shards            |    73 |   34.9 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):
