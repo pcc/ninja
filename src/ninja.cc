@@ -243,7 +243,6 @@ struct NinjaMain : public BuildLogUser {
 
   /// For each edge, lookup in build log how long it took last time,
   /// and record that in the edge itself. It will be used for ETA prediction.
-  void ParsePreviousElapsedTimes();
 
   /// Build the targets listed on the command line.
   /// @return an exit code.
@@ -383,19 +382,6 @@ bool NinjaMain::RebuildManifest(const char* input_file, string* err,
   }
 
   return true;
-}
-
-void NinjaMain::ParsePreviousElapsedTimes() {
-  for (Edge* edge : state_.edges_) {
-    for (Node* out : edge->outputs_) {
-      BuildLog::LogEntry* log_entry = build_log_.LookupByOutput(out->path());
-      if (!log_entry)
-        continue;  // Maybe we'll have log entry for next output of this edge?
-      edge->prev_elapsed_time_millis =
-          log_entry->end_time - log_entry->start_time;
-      break;  // Onto next edge.
-    }
-  }
 }
 
 Node* NinjaMain::CollectTarget(const char* cpath, string* err) {
@@ -1849,6 +1835,7 @@ ExitStatus NinjaMain::RunBuild(int argc, char** argv, Status* status) {
   if (jobserver_state.client()) {
     builder.SetJobserverClient(jobserver_state.TakeClient());
   }
+  builder.UsePreviousElapsedTimes(&build_log_);
 
   for (size_t i = 0; i < targets.size(); ++i) {
     if (!builder.AddTarget(targets[i], &err)) {
@@ -2124,7 +2111,6 @@ NORETURN void real_main(int argc, char** argv) {
       const_cast<BuildConfig&>(ninja.config_).jobserver_pool = true;
     }
 
-    ninja.ParsePreviousElapsedTimes();
 
     ExitStatus result = ninja.RunBuild(argc, argv, status);
     if (g_metrics)

@@ -132,6 +132,9 @@ struct Plan {
   /// currently-full pool.
   void ScheduleWork(std::map<Edge*, Want>::iterator want_e);
 
+  /// Set the edge's prev_elapsed_time_millis, if the Builder wants that.
+  void LoadPreviousElapsedTime(Edge* edge) const;
+
   /// Keep track of which edges we want to build in this plan.  If this map does
   /// not contain an entry for an edge, we do not want to build the entry or its
   /// dependents.  If it does contain an entry, the enumeration indicates what
@@ -221,6 +224,13 @@ struct Builder {
     jobserver_ = std::move(jobserver_client);
   }
 
+  /// Set Edge::prev_elapsed_time_millis from \a build_log, for the edges
+  /// that get added to the plan (the only ones that use it).
+  void UsePreviousElapsedTimes(BuildLog* build_log) {
+    elapsed_times_log_ = build_log;
+  }
+  BuildLog* elapsed_times_log() const { return elapsed_times_log_; }
+
   /// Clean up after interrupted commands by deleting output files.
   void Cleanup();
 
@@ -274,6 +284,9 @@ private:
   /// Map of running edge to time the edge started running.
   typedef std::map<const Edge*, int64_t> RunningEdgeMap;
   RunningEdgeMap running_edges_;
+
+  /// See UsePreviousElapsedTimes().
+  BuildLog* elapsed_times_log_ = nullptr;
 
   /// Time the build started.
   int64_t start_time_millis_;

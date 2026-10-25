@@ -133,6 +133,7 @@ don't compare exactly.
 | load logs while parsing        |   180 |    127 |
 | concurrent node creation       |   175 |    113 |
 | mallopt(M_TOP_PAD, 64MB)       |   173 |     92 |
+| lazy previous elapsed times    |   175 |     89 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

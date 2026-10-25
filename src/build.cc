@@ -124,6 +124,8 @@ bool Plan::AddSubTarget(const Node* node, const Node* dependent, string* err,
   pair<map<Edge*, Want>::iterator, bool> want_ins =
     want_.insert(make_pair(edge, kWantNothing));
   Want& want = want_ins.first->second;
+  if (want_ins.second)
+    LoadPreviousElapsedTime(edge);
 
   if (dyndep_walk && want == kWantToFinish)
     return false;  // Don't need to do anything with already-scheduled edge.
@@ -148,6 +150,20 @@ bool Plan::AddSubTarget(const Node* node, const Node* dependent, string* err,
   }
 
   return true;
+}
+
+void Plan::LoadPreviousElapsedTime(Edge* edge) const {
+  BuildLog* build_log = builder_ ? builder_->elapsed_times_log() : nullptr;
+  if (!build_log)
+    return;
+  for (Node* out : edge->outputs_) {
+    BuildLog::LogEntry* log_entry = build_log->LookupByOutput(out->path());
+    if (!log_entry)
+      continue;  // Maybe we'll have log entry for next output of this edge?
+    edge->prev_elapsed_time_millis =
+        log_entry->end_time - log_entry->start_time;
+    break;  // Onto next edge.
+  }
 }
 
 void Plan::EdgeWanted(const Edge* edge) {
