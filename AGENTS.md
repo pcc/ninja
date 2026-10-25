@@ -66,7 +66,10 @@ Machines used:
 ## Design notes
 
 - `src/thread_pool.*`: process-wide pool (GetProcessorCount() threads incl.
-  the caller); `TaskGroup`, `ParallelFor`, `RunTasksUntil`. Workers block
+  the caller); `TaskGroup`, `ParallelFor`, `RunTasksUntil`. A FIFO queue:
+  `TaskGroup::Wait()` runs whatever is queued, but `ParallelFor()` only
+  waits for its own chunks (running unrelated tasks there delayed the
+  critical path by milliseconds). Workers block
   all signals (the main loop relies on SIGCHLD/SIGINT interrupting ppoll).
 - `src/char_scan.h`: `FindFirstOf<chars...>()` (NEON/SSE2/scalar); buffers
   need `kCharScanPadding` readable bytes after the terminating NUL.
@@ -200,6 +203,7 @@ don't compare exactly.
 | scan bindings in the cache     |    89 |     52 |
 | (parallel build log parse)     |    84 |   (~0) |
 | nodes' edges in the cache      |    84 |     50 |
+| ParallelFor waits, doesn't steal |    79 |     49 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):

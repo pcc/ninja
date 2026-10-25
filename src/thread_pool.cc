@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -142,18 +143,42 @@ void ParallelFor(size_t count, size_t grain,
       fn(0, count);
     return;
   }
-  std::atomic<size_t> next{0};
-  auto work = [&] {
+  // The caller only waits for the chunks that other threads are working on:
+  // it doesn't run other tasks meanwhile (which could take much longer).
+  // Helpers that start late find no chunks left, so they only use the
+  // shared state.
+  struct State {
+    std::atomic<size_t> next{0};
+    std::atomic<size_t> done{0};
+    size_t count = 0;
+    size_t grain = 0;
+    const std::function<void(size_t begin, size_t end)>* fn = nullptr;
+    std::mutex mutex;
+    std::condition_variable cond;
+  };
+  auto state = std::make_shared<State>();
+  state->count = count;
+  state->grain = grain;
+  state->fn = &fn;
+  auto work = [](State* s) {
     for (;;) {
-      size_t begin = next.fetch_add(grain, std::memory_order_relaxed);
-      if (begin >= count)
+      size_t begin = s->next.fetch_add(s->grain, std::memory_order_relaxed);
+      if (begin >= s->count)
         return;
-      fn(begin, std::min(begin + grain, count));
+      size_t end = std::min(begin + s->grain, s->count);
+      (*s->fn)(begin, end);
+      if (s->done.fetch_add(end - begin, std::memory_order_acq_rel) +
+              (end - begin) == s->count) {
+        std::lock_guard<std::mutex> lock(s->mutex);
+        s->cond.notify_all();
+      }
     }
   };
-  TaskGroup group;
   for (size_t i = 1; i < threads; ++i)
-    group.Run(work);
-  work();
-  group.Wait();
+    RunDetached([state, work] { work(state.get()); });
+  work(state.get());
+  std::unique_lock<std::mutex> lock(state->mutex);
+  state->cond.wait(lock, [&] {
+    return state->done.load(std::memory_order_acquire) == count;
+  });
 }
