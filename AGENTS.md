@@ -78,7 +78,11 @@ Machines used:
   `ninja_required_version` state for `$^` is emulated.
 - `DependencyScan::Prefetch()` (graph.cc): parallel stat + binding
   evaluation before the serial scan; only with thread-safe Stat() and
-  without `-d explain`.
+  without `-d explain`. It also summarizes each edge's deps-log deps
+  without in-edges (dirty?, newest mtime) in `Edge::scan_deps_`; the
+  serial scan uses that and only adds the deps to `inputs_` if the edge
+  ends up not ready (`Edge::deps_pending_`). Summaries are invalidated
+  when dyndep files are loaded (`dyndep_epoch_`).
 - `.ninja_deps` is mmap()ed (read on Windows); `DepsLog::Deps::nodes` is
   a view mapping the ids stored in the file through the log's id->Node
   table, so loading doesn't allocate or convert per dependency.
@@ -105,6 +109,7 @@ don't compare exactly.
 | parallel scan prefetch         |   428 |    329 |
 | new lexer, parallel subninjas  |   327 |    251 |
 | deps log: ids stay in the file |   291 |    209 |
+| summarize leaf deps in prefetch|   215 |    139 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

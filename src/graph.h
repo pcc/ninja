@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "deps_log.h"
 #include "dyndep.h"
 #include "eval_env.h"
 #include "explanations.h"
@@ -64,15 +65,18 @@ struct Node {
     mtime_ = -1;
     exists_ = ExistenceStatusUnknown;
     dirty_ = false;
-    prefetch_claimed_.store(false, std::memory_order_relaxed);
+    prefetch_state_.store(kPrefetchNone, std::memory_order_relaxed);
   }
 
-  /// Claim this node for stat()ing by DependencyScan::Prefetch().  Returns
-  /// true for exactly one caller (until ResetState()).
-  bool ClaimForPrefetch() {
-    return !prefetch_claimed_.load(std::memory_order_relaxed) &&
-           !prefetch_claimed_.exchange(true, std::memory_order_relaxed);
-  }
+  /// States of a node during DependencyScan::Prefetch(), in which threads
+  /// claim nodes to stat() them.
+  enum PrefetchState : uint8_t {
+    kPrefetchNone,
+    kPrefetchClaimed,
+    /// Done with the node; if it's still not status_known(), stat() failed.
+    kPrefetchDone,
+  };
+  std::atomic<uint8_t>& prefetch_state() { return prefetch_state_; }
 
   /// Mark the Node as already-stat()ed and missing.
   void MarkMissing() {
@@ -183,8 +187,8 @@ private:
   /// See has_unrecorded_out_edges().
   bool has_unrecorded_out_edges_ = false;
 
-  /// See ClaimForPrefetch().
-  std::atomic<bool> prefetch_claimed_{false};
+  /// See PrefetchState.
+  std::atomic<uint8_t> prefetch_state_{kPrefetchNone};
 
   /// A dense integer id for the node, assigned and used by DepsLog.
   int id_ = -1;
@@ -316,6 +320,28 @@ struct Edge {
     uint64_t command_hash = 0;
   };
   ScanBindings scan_bindings_;
+
+  /// A summary of the edge's dependencies in the deps log, computed by
+  /// DependencyScan::Prefetch(), so that the scan doesn't need to visit
+  /// the dependencies without an in-edge, which tend to be numerous.
+  struct ScanDeps {
+    bool valid = false;
+    /// The DependencyScan::dyndep_epoch_ when computed: loading dyndep files
+    /// may give nodes in-edges.
+    int epoch = 0;
+    /// Whether any of the dependencies without an in-edge is dirty.
+    bool leaf_dirty = false;
+    /// The first one with the largest mtime of the ones that are not dirty.
+    Node* leaf_most_recent = nullptr;
+    /// The dependencies with an in-edge, in order.
+    std::vector<Node*> non_leaf;
+  };
+  ScanDeps scan_deps_;
+
+  /// Set if the dirty scan used scan_deps_ instead of adding the deps
+  /// from the log to inputs_; they are added if the edge's outputs turn
+  /// out not to be ready (otherwise nothing looks at its inputs anymore).
+  bool deps_pending_ = false;
 };
 
 struct EdgeCmp {
@@ -370,6 +396,17 @@ struct ImplicitDepLoader {
   /// Load implicit dependencies for \a input_range from the DepsLog.
   /// @return false/empty on error (without filling \a err if info is just missing).
   std::optional<EdgeInputsRange> LoadDepsFromLog(Edge* edge, std::string* err);
+
+ public:
+  /// Find the dependencies of \a edge in the DepsLog, checking that they are
+  /// up to date.  Returns null if they are not (without filling \a err) or
+  /// on errors.
+  DepsLog::Deps* FindDepsInLog(const Edge* edge, std::string* err) const;
+
+  /// Add the dependencies \a deps from the DepsLog to \a edge.
+  EdgeInputsRange AddDepsFromLog(Edge* edge, const DepsLog::Deps* deps);
+
+ protected:
   bool LoadDepsFromLogTry(const Edge* edge, std::string* err) const;
 
   /// Preallocate \a count spaces in the input array on \a edge, returning
@@ -488,6 +525,13 @@ struct DependencyScan {
                                  std::vector<Node*>* stack,
                                  std::vector<Node*>* validation_nodes,
                                  std::string* err);
+  /// Like RecomputeEdgesInputsDirty() for the deps of \a edge in the log,
+  /// using the summary Prefetch() made of them.
+  bool RecomputeDepsSummaryDirty(const Node* node, Edge* edge,
+                                 Node*& most_recent_input, bool& dirty,
+                                 std::vector<Node*>* stack,
+                                 std::vector<Node*>* validation_nodes,
+                                 std::string* err);
   bool VerifyDAG(Node* node, std::vector<Node*>* stack, std::string* err);
 
   void RecordExplanation(const Node* node, const char* fmt, ...);
@@ -497,6 +541,8 @@ struct DependencyScan {
   ImplicitDepLoader dep_loader_;
   DyndepLoader dyndep_loader_;
   OptionalExplanations explanations_;
+  /// Incremented when loading dyndep files.  See Edge::ScanDeps.
+  mutable int dyndep_epoch_ = 0;
 };
 
 // Implements a less comparison for edges by priority, where highest

@@ -1284,7 +1284,10 @@ std::string DescribeScan(State* state) {
     result += edge->outputs_[0]->path() + ":";
     result += edge->outputs_ready() ? " ready" : " not-ready";
     result += edge->deps_missing_ ? " deps-missing" : "";
-    result += " inputs=" + std::to_string(edge->inputs_.size());
+    // The scan may not add the deps of edges whose outputs are ready to
+    // their inputs: nothing looks at them anymore.
+    if (!edge->outputs_ready())
+      result += " inputs=" + std::to_string(edge->inputs_.size());
     for (Node* node : edge->outputs_)
       result += std::string(" ") + (node->dirty() ? "dirty" : "clean");
     result += "\n";
@@ -1327,14 +1330,16 @@ TEST(GraphPrefetchTest, MatchesSerialScan) {
       "  flags = -O2\n"
       "build gen.h: gen gen.in\n"
       "build uses_gen.o: cc uses_gen.c || gen.h\n"
+      "build waits.o: cc waits.c || no_log.o\n"
       "build lib.a: ar clean.o dirty_dep.o missing_dep.o no_deps.o no_log.o "
-      "cmd.o uses_gen.o\n"
+      "cmd.o uses_gen.o waits.o\n"
       "build all: phony lib.a build.ninja\n";
   const time_t kOld = 1000000000, kNew = kOld + 100, kNewer = kOld + 200;
 
   const char* const kSources[] = { "clean.c", "dirty_dep.c", "missing_dep.c",
                                    "no_deps.c", "no_log.c", "cmd.c",
-                                   "uses_gen.c", "common.h", "gen.in" };
+                                   "uses_gen.c", "waits.c", "common.h",
+                                   "gen.in" };
   for (const char* source : kSources)
     WriteFileWithTime(source, kOld);
   WriteFileWithTime("dirty.h", kNewer);
@@ -1342,7 +1347,7 @@ TEST(GraphPrefetchTest, MatchesSerialScan) {
   WriteFileWithTime("build.ninja", kNew);
   const char* const kObjects[] = { "clean.o", "dirty_dep.o", "missing_dep.o",
                                    "no_deps.o", "no_log.o", "cmd.o",
-                                   "uses_gen.o", "lib.a" };
+                                   "uses_gen.o", "waits.o", "lib.a" };
   for (const char* object : kObjects)
     WriteFileWithTime(object, kNew);
   std::string err;
@@ -1398,16 +1403,17 @@ TEST(GraphPrefetchTest, MatchesSerialScan) {
     results[prefetch] = DescribeScan(&state);
   }
   EXPECT_EQ(
-      "build.ninja: ready inputs=1 clean\n"
-      "clean.o: ready inputs=3 clean\n"
+      "build.ninja: ready clean\n"
+      "clean.o: ready clean\n"
       "dirty_dep.o: not-ready inputs=4 dirty\n"
       "missing_dep.o: not-ready inputs=4 dirty\n"
       "no_deps.o: not-ready deps-missing inputs=1 dirty\n"
       "no_log.o: not-ready inputs=1 dirty\n"
       "cmd.o: not-ready inputs=1 dirty\n"
-      "gen.h: ready inputs=1 clean\n"
-      "uses_gen.o: ready inputs=5 clean\n"
-      "lib.a: not-ready inputs=7 dirty\n"
+      "gen.h: ready clean\n"
+      "uses_gen.o: ready clean\n"
+      "waits.o: not-ready inputs=4 clean\n"
+      "lib.a: not-ready inputs=8 dirty\n"
       "all: not-ready inputs=2 dirty\n",
       results[0]);
   EXPECT_EQ(results[0], results[1]);

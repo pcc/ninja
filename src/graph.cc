@@ -360,17 +360,31 @@ void DependencyScan::Prefetch(Node* initial_node) {
 
   // stat() a node, unless another thread does (or did) it.
   auto stat_node = [this](Node* node) {
-    if (!node->ClaimForPrefetch() || node->status_known())
+    std::atomic<uint8_t>& state = node->prefetch_state();
+    uint8_t expected = Node::kPrefetchNone;
+    if (state.load(std::memory_order_relaxed) != expected ||
+        !state.compare_exchange_strong(expected, Node::kPrefetchClaimed,
+                                       std::memory_order_acquire))
       return;
     std::string err;
     // On errors, leave the node for RecomputeDirty() to report.
-    if (!node->Stat(disk_interface_, &err))
-      return;
-    // This is what RecomputeNodeDirty() would do on visiting a leaf node,
-    // and it skips visiting nodes whose status is already known.
-    if (!node->in_edge())
-      node->set_dirty(!node->exists());
+    if (!node->status_known() && node->Stat(disk_interface_, &err)) {
+      // This is what RecomputeNodeDirty() would do on visiting a leaf node,
+      // and it skips visiting nodes whose status is already known.
+      if (!node->in_edge())
+        node->set_dirty(!node->exists());
+    }
+    state.store(Node::kPrefetchDone, std::memory_order_release);
   };
+  // Wait for a node claimed by stat_node() to be done, and return whether
+  // its status is known.
+  auto wait_for_stat = [](Node* node) {
+    while (node->prefetch_state().load(std::memory_order_acquire) !=
+           Node::kPrefetchDone) {
+    }
+    return node->status_known();
+  };
+  const int epoch = dyndep_epoch_;
 
   ParallelFor(edges.size(), 16, [&](size_t begin, size_t end) {
     for (size_t i = begin; i < end; ++i) {
@@ -388,8 +402,26 @@ void DependencyScan::Prefetch(Node* initial_node) {
         stat_node(input);
       if (b.has_deps && deps_log()) {
         if (DepsLog::Deps* deps = deps_log()->GetDeps(edge->outputs_[0])) {
-          for (int j = 0; j < deps->node_count; ++j)
-            stat_node(deps->nodes[j]);
+          Edge::ScanDeps& summary = edge->scan_deps_;
+          summary.valid = true;
+          summary.epoch = epoch;
+          summary.leaf_dirty = false;
+          summary.leaf_most_recent = nullptr;
+          summary.non_leaf.clear();
+          for (int j = 0; j < deps->node_count; ++j) {
+            Node* node = deps->nodes[j];
+            stat_node(node);
+            if (node->in_edge()) {
+              summary.non_leaf.push_back(node);
+            } else if (!wait_for_stat(node)) {
+              summary.valid = false;
+            } else if (node->dirty()) {
+              summary.leaf_dirty = true;
+            } else if (!summary.leaf_most_recent ||
+                       node->mtime() > summary.leaf_most_recent->mtime()) {
+              summary.leaf_most_recent = node;
+            }
+          }
         }
       }
 
@@ -493,6 +525,38 @@ bool DependencyScan::RecomputeEdgesInputsDirty(
   return true;
 }
 
+bool DependencyScan::RecomputeDepsSummaryDirty(
+    const Node* node, Edge* edge, Node*& most_recent_input, bool& dirty,
+    std::vector<Node*>* stack, std::vector<Node*>* validation_nodes,
+    std::string* err) {
+  const Edge::ScanDeps& summary = edge->scan_deps_;
+  // The dependencies with an in-edge are handled as usual (they are never
+  // order-only).  The other ones were visited by Prefetch(), and only their
+  // dirtiness and mtimes matter.
+  for (Node* input : summary.non_leaf) {
+    if (!RecomputeNodeDirty(input, stack, validation_nodes, err))
+      return false;
+  }
+  for (Node* input : summary.non_leaf) {
+    if (!input->in_edge()->outputs_ready_)
+      edge->outputs_ready_ = false;
+    if (input->dirty()) {
+      explanations_.Record(node, "%s is dirty", input->path().c_str());
+      dirty = true;
+    } else if (!most_recent_input ||
+               input->mtime() > most_recent_input->mtime()) {
+      most_recent_input = input;
+    }
+  }
+  if (summary.leaf_dirty)
+    dirty = true;
+  Node* leaf = summary.leaf_most_recent;
+  if (leaf && (!most_recent_input ||
+               leaf->mtime() > most_recent_input->mtime()))
+    most_recent_input = leaf;
+  return true;
+}
+
 bool DependencyScan::RecomputeNodeDirty(Node* node, std::vector<Node*>* stack,
                                         std::vector<Node*>* validation_nodes,
                                         string* err) {
@@ -589,7 +653,23 @@ bool DependencyScan::RecomputeNodeDirty(Node* node, std::vector<Node*>* stack,
   if (!edge_deps_loaded) {
     // only try to load the deps log if no rebuild is necessary
     // if an rebuild is necessary the deps log is outdated for this target
-    if (!dirty) {
+    if (!dirty && edge->scan_deps_.valid &&
+        edge->scan_deps_.epoch == dyndep_epoch_ && HasDepsBinding(edge)) {
+      // Like the else branch, but using the summary of the deps.
+      const Node* most_recent_input_previous = most_recent_input;
+      if (!dep_loader_.FindDepsInLog(edge, err)) {
+        if (!err->empty())
+          return false;
+        dirty = edge->deps_missing_ = true;
+      } else {
+        edge->deps_pending_ = true;
+        if (!RecomputeDepsSummaryDirty(node, edge, most_recent_input, dirty,
+                                       stack, validation_nodes, err))
+          return false;
+        if (!dirty && most_recent_input_previous != most_recent_input)
+          dirty = recomputeOutputsDirty.depfile(most_recent_input);
+      }
+    } else if (!dirty) {
       // Load discovered deps.
       std::optional<EdgeInputsRange> new_deps = dep_loader_.LoadDeps(edge, err);
       if (!new_deps) {
@@ -633,6 +713,14 @@ bool DependencyScan::RecomputeNodeDirty(Node* node, std::vector<Node*>* stack,
   // ready.
   if (dirty && !(edge->is_phony() && edge->inputs_.empty()))
     edge->outputs_ready_ = false;
+
+  // If the outputs are not ready, the build will look at the inputs.
+  if (!edge->outputs_ready_ && edge->deps_pending_) {
+    edge->deps_pending_ = false;
+    DepsLog::Deps* deps = dep_loader_.FindDepsInLog(edge, err);
+    assert(deps);
+    dep_loader_.AddDepsFromLog(edge, deps);
+  }
 
   // Mark the edge as finished during this walk now that it will no longer
   // be in the call stack.
@@ -690,11 +778,13 @@ bool DependencyScan::RecomputeOutputsDirty(Edge* edge, Node* most_recent_input,
 }
 
 bool DependencyScan::LoadDyndeps(Node* node, string* err) const {
+  ++dyndep_epoch_;
   return dyndep_loader_.LoadDyndeps(node, err);
 }
 
 bool DependencyScan::LoadDyndeps(Node* node, DyndepFile* ddf,
                                  string* err) const {
+  ++dyndep_epoch_;
   return dyndep_loader_.LoadDyndeps(node, ddf, err);
 }
 
@@ -1093,20 +1183,21 @@ std::optional<EdgeInputsRange> ImplicitDepLoader::ProcessDepfileDeps(
   return EdgeInputsRange(edge, beg, end);
 }
 
-std::optional<EdgeInputsRange> ImplicitDepLoader::LoadDepsFromLog(Edge* edge,
-                                                                  string* err) {
+DepsLog::Deps* ImplicitDepLoader::FindDepsInLog(const Edge* edge,
+                                               string* err) const {
   // NOTE: deps are only supported for single-target edges.
   Node* output = edge->outputs_[0];
   DepsLog::Deps* deps = deps_log_ ? deps_log_->GetDeps(output) : NULL;
   if (!deps) {
+    err->clear();
     explanations_.Record(output, "deps for '%s' are missing",
                          output->path().c_str());
-    return std::nullopt;
+    return NULL;
   }
 
   // Load the output's mtime if we haven't already.
   if (!output->StatIfNecessary(disk_interface_, err)) {
-    return std::nullopt;
+    return NULL;
   }
 
   // Deps are invalid if the output is newer than the deps.
@@ -1115,9 +1206,14 @@ std::optional<EdgeInputsRange> ImplicitDepLoader::LoadDepsFromLog(Edge* edge,
                          "stored deps info out of date for '%s' (%" PRId64
                          " vs %" PRId64 ")",
                          output->path().c_str(), deps->mtime, output->mtime());
-    return std::nullopt;
+    return NULL;
   }
 
+  return deps;
+}
+
+EdgeInputsRange ImplicitDepLoader::AddDepsFromLog(Edge* edge,
+                                                  const DepsLog::Deps* deps) {
   const int node_count = deps->node_count;
   const auto begin = PreallocateSpace(edge, node_count);
   for (int i = 0; i < node_count; ++i) {
@@ -1128,33 +1224,17 @@ std::optional<EdgeInputsRange> ImplicitDepLoader::LoadDepsFromLog(Edge* edge,
   return EdgeInputsRange(edge, begin, begin + node_count);
 }
 
+std::optional<EdgeInputsRange> ImplicitDepLoader::LoadDepsFromLog(Edge* edge,
+                                                                  string* err) {
+  DepsLog::Deps* deps = FindDepsInLog(edge, err);
+  if (!deps)
+    return std::nullopt;
+  return AddDepsFromLog(edge, deps);
+}
+
 bool ImplicitDepLoader::LoadDepsFromLogTry(const Edge* edge,
                                            string* err) const {
-  // NOTE: deps are only supported for single-target edges.
-  Node* output = edge->outputs_[0];
-  DepsLog::Deps* deps = deps_log_ ? deps_log_->GetDeps(output) : NULL;
-  if (!deps) {
-    err->clear();
-    explanations_.Record(output, "deps for '%s' are missing",
-                         output->path().c_str());
-    return false;
-  }
-
-  // Load the output's mtime if we haven't already.
-  if (!output->StatIfNecessary(disk_interface_, err)) {
-    return false;
-  }
-
-  // Deps are invalid if the output is newer than the deps.
-  if (output->mtime() > deps->mtime) {
-    explanations_.Record(output,
-                         "stored deps info out of date for '%s' (%" PRId64
-                         " vs %" PRId64 ")",
-                         output->path().c_str(), deps->mtime, output->mtime());
-    return false;
-  }
-
-  return true;
+  return FindDepsInLog(edge, err) != NULL;
 }
 
 vector<Node*>::iterator ImplicitDepLoader::PreallocateSpace(Edge* edge,
