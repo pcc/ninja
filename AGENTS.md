@@ -74,6 +74,7 @@ don't compare exactly.
 | sh-floor                       |    13 |      9 |
 | baseline (upstream ninja)      |   670 |    636 |
 | critical path: skip ready edges|   615 |    596 |
+| no out-edges for leaf deps     |   539 |    517 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

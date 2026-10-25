@@ -122,6 +122,14 @@ struct Node {
   }
   void AddValidationOutEdge(Edge* edge) { validation_out_edges_.push_back(edge); }
 
+  /// Whether this node was added as an input to some edge by a dep loader
+  /// while it had no in-edge, without that edge being recorded in
+  /// out_edges_.  See ImplicitDepLoader::AddDepOutEdge().
+  bool has_unrecorded_out_edges() const { return has_unrecorded_out_edges_; }
+  void set_has_unrecorded_out_edges(bool value) {
+    has_unrecorded_out_edges_ = value;
+  }
+
   void Dump(const char* prefix="") const;
 
 private:
@@ -162,6 +170,9 @@ private:
   /// all nodes have this flag set to true, since the deps and build logs
   /// can be loaded before the manifest.
   bool generated_by_dep_loader_ = true;
+
+  /// See has_unrecorded_out_edges().
+  bool has_unrecorded_out_edges_ = false;
 
   /// A dense integer id for the node, assigned and used by DepsLog.
   int id_ = -1;
@@ -336,6 +347,21 @@ struct ImplicitDepLoader {
   /// Preallocate \a count spaces in the input array on \a edge, returning
   /// an iterator pointing at the first new space.
   std::vector<Node*>::iterator PreallocateSpace(Edge* edge, int count);
+
+  /// Record that \a edge has the loaded dependency \a node as an input.
+  ///
+  /// Out-edges are only consulted for nodes that have an in-edge (to find
+  /// the edges that may have become ready once the node is built).  Most
+  /// loaded dependencies are leaf headers shared by a large number of
+  /// edges, so recording out-edges for them is expensive and useless.
+  /// Such nodes are just flagged instead; if one of them later gains an
+  /// in-edge from a dyndep file, its out-edges are recomputed then.
+  static void AddDepOutEdge(Node* node, Edge* edge) {
+    if (node->in_edge())
+      node->AddOutEdge(edge);
+    else
+      node->set_has_unrecorded_out_edges(true);
+  }
 
   State* state_;
   DiskInterface* disk_interface_;

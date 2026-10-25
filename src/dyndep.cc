@@ -100,6 +100,19 @@ bool DyndepLoader::UpdateEdge(Edge* edge, Dyndeps const* dyndeps,
       return false;
     }
     node->set_in_edge(edge);
+
+    // Now that the node has an in-edge, its out-edges matter: recover any
+    // that were not recorded when deps were loaded.
+    if (node->has_unrecorded_out_edges()) {
+      node->set_has_unrecorded_out_edges(false);
+      for (Edge* e : state_->edges_) {
+        if (std::find(e->inputs_.begin(), e->inputs_.end(), node) !=
+                e->inputs_.end() &&
+            std::find(node->out_edges().begin(), node->out_edges().end(),
+                      e) == node->out_edges().end())
+          node->AddOutEdge(e);
+      }
+    }
   }
 
   // Add the dyndep-discovered inputs to the edge.
