@@ -31,6 +31,7 @@ typedef __int32 int32_t;
 typedef unsigned __int32 uint32_t;
 #endif
 
+#include "disk_interface.h"
 #include "graph.h"
 #include "metrics.h"
 #include "state.h"
@@ -222,6 +223,67 @@ void DepsLog::Close() {
   file_ = NULL;
 }
 
+/// stat() results for the nodes of a deps log, by id, computed on other
+/// threads while the manifest is parsed.
+struct DepsLog::EarlyStats {
+  enum : uint8_t { kNone, kClaimed, kDone, kTaken };
+
+  EarlyStats(std::vector<Node*> nodes, const DiskInterface* disk_interface)
+      : nodes(std::move(nodes)), disk_interface(disk_interface),
+        states(new std::atomic<uint8_t>[this->nodes.size()]),
+        mtimes(new TimeStamp[this->nodes.size()]) {
+    for (size_t i = 0; i < this->nodes.size(); ++i)
+      states[i].store(kNone, std::memory_order_relaxed);
+  }
+
+  ~EarlyStats() {
+    cancel.store(true, std::memory_order_relaxed);
+    tasks.Wait();
+  }
+
+  /// stat() the next chunk of nodes, then queue the rest, so that other
+  /// tasks (parsing the manifest) get to run in between.
+  void StatSome() {
+    const size_t kChunk = 256;
+    size_t begin = next.fetch_add(kChunk, std::memory_order_relaxed);
+    if (begin >= nodes.size() || cancel.load(std::memory_order_relaxed))
+      return;
+    size_t end = std::min(begin + kChunk, nodes.size());
+    for (size_t id = begin; id < end; ++id) {
+      uint8_t s = kNone;
+      if (!states[id].compare_exchange_strong(s, kClaimed,
+                                              std::memory_order_acquire))
+        continue;
+      std::string err;
+      mtimes[id] = disk_interface->Stat(nodes[id]->path(), &err);
+      states[id].store(kDone, std::memory_order_release);
+    }
+    tasks.Run([this] { StatSome(); });
+  }
+
+  TimeStamp Take(int id) {
+    if (forgotten || static_cast<size_t>(id) >= nodes.size())
+      return -1;
+    uint8_t s = kNone;
+    if (states[id].compare_exchange_strong(s, kTaken,
+                                           std::memory_order_acquire))
+      return -1;
+    while (s == kClaimed)
+      s = states[id].load(std::memory_order_acquire);
+    // A failed stat() returned -1 as well.
+    return s == kDone ? mtimes[id] : -1;
+  }
+
+  std::vector<Node*> nodes;
+  const DiskInterface* disk_interface;
+  std::unique_ptr<std::atomic<uint8_t>[]> states;
+  std::unique_ptr<TimeStamp[]> mtimes;
+  std::atomic<size_t> next{0};
+  std::atomic<bool> cancel{false};
+  bool forgotten = false;
+  TaskGroup tasks;
+};
+
 /// The result of DepsLog::Read().
 struct DepsLog::PendingLoad {
   std::unique_ptr<LoadedFile> file;
@@ -242,6 +304,8 @@ struct DepsLog::PendingLoad {
   /// The nodes for path records (null for deps records), if CreateNodes()
   /// ran.
   std::vector<Node*> nodes;
+  /// See StartEarlyStats().
+  std::shared_ptr<EarlyStats> early_stats;
   /// Whether a record failed the checks, and the end of the last record
   /// before it.
   bool read_failed = false;
@@ -361,6 +425,35 @@ void DepsLog::CreateNodes(PendingLoad* pending, State* state) {
   });
 }
 
+void DepsLog::StartEarlyStats(PendingLoad* pending,
+                              const DiskInterface* disk_interface) {
+  // The ids of the nodes, if loading the log succeeds.
+  std::vector<Node*> nodes;
+  for (Node* node : pending->nodes)
+    if (node)
+      nodes.push_back(node);
+  pending->early_stats.reset(new EarlyStats(std::move(nodes), disk_interface));
+  EarlyStats* early = pending->early_stats.get();
+  // About half of the threads, to leave room for the parse.
+  size_t tasks = std::max<size_t>(1, TaskGroup::Concurrency() / 2);
+  for (size_t i = 0; i < tasks; ++i)
+    early->tasks.Run([early] { early->StatSome(); });
+}
+
+TimeStamp DepsLog::TakeEarlyStat(int id) {
+  return early_stats_ ? early_stats_->Take(id) : -1;
+}
+
+void DepsLog::WaitForEarlyStats() {
+  if (early_stats_)
+    early_stats_->tasks.Wait();
+}
+
+void DepsLog::ForgetEarlyStats() {
+  if (early_stats_)
+    early_stats_->forgotten = true;
+}
+
 LoadStatus DepsLog::Load(const string& path, State* state, string* err) {
   return Load(Read(path), path, state, err);
 }
@@ -440,6 +533,7 @@ LoadStatus DepsLog::Load(PendingLoadPtr pending, const string& path,
     }
   }
   loaded_files_.push_back(std::move(pending->file));
+  early_stats_ = std::move(pending->early_stats);
 
   if (read_failed) {
     // An error occurred while loading; try to recover by truncating the

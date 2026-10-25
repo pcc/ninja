@@ -314,12 +314,7 @@ std::string GetUnescapedDepfile(const Edge* edge) {
 }  // namespace
 
 bool Node::Stat(DiskInterface* disk_interface, string* err) {
-  mtime_ = disk_interface->Stat(path_, err);
-  if (mtime_ == -1) {
-    return false;
-  }
-  exists_ = (mtime_ != 0) ? ExistenceStatusExists : ExistenceStatusMissing;
-  return true;
+  return UpdateStat(disk_interface->Stat(path_, err));
 }
 
 void Node::UpdatePhonyMtime(TimeStamp mtime) {
@@ -397,7 +392,15 @@ void DependencyScan::Prefetch(Node* initial_node) {
     if (s == kNone && state.compare_exchange_strong(
                           s, kClaimed, std::memory_order_acquire)) {
       Node* node = (*id_nodes)[id];
-      stat(node);
+      // The node may have been stat()ed already, early.
+      TimeStamp early = deps_log()->TakeEarlyStat(id);
+      if (early != -1 && !node->status_known()) {
+        node->UpdateStat(early);
+        if (!node->in_edge())
+          node->set_dirty(!node->exists());
+      } else {
+        stat(node);
+      }
       s = kDone;
       if (node->in_edge())
         s |= kNonLeaf;

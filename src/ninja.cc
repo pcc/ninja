@@ -374,6 +374,8 @@ bool NinjaMain::RebuildManifest(const char* input_file, string* err,
   if (builder.AlreadyUpToDate())
     return false;  // Not an error, but we didn't rebuild.
 
+  // Commands may change files that were stat()ed already.
+  deps_log_.ForgetEarlyStats();
   if (builder.Build(err) != ExitSuccess)
     return false;
 
@@ -1588,6 +1590,7 @@ void NinjaMain::DepsLogStepDone() {
     return;
   logs->tasks.Run([this, logs] {
     DepsLog::CreateNodes(logs->deps_log.get(), &state_);
+    DepsLog::StartEarlyStats(logs->deps_log.get(), &disk_interface_);
   });
 }
 
@@ -1829,6 +1832,12 @@ ExitStatus NinjaMain::RunBuild(int argc, char** argv, Status* status) {
     return ExitFailure;
   }
 
+#ifdef _WIN32
+  // The stat cache is not thread-safe: the deps log's early stats, which
+  // don't use it, must be done first.
+  if (g_experimental_statcache)
+    deps_log_.WaitForEarlyStats();
+#endif
   disk_interface_.AllowStatCache(g_experimental_statcache);
 
   // Setup jobserver pool and client if needed.

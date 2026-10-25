@@ -867,4 +867,51 @@ TEST_F(DepsLogTest, RecompactBogusOutId) {
   }
 }
 
+// The nodes of a deps log can be created and stat()ed while the manifest is
+// parsed; check that the results are those of stat().
+TEST_F(DepsLogTest, EarlyStats) {
+  ScopedFilePath real_file("DepsLogTest-tempreal");
+  {
+    FILE* f = fopen(real_file.c_str(), "w");
+    ASSERT_TRUE(f);
+    fclose(f);
+  }
+  {
+    State state;
+    DepsLog log;
+    string err;
+    EXPECT_TRUE(log.OpenForWrite(kTestFilename, &err));
+    vector<Node*> deps;
+    deps.push_back(state.GetNode(real_file.c_str(), 0));
+    deps.push_back(state.GetNode("DepsLogTest-missing", 0));
+    log.RecordDeps(state.GetNode("out.o", 0), 1, deps);
+    log.Close();
+  }
+
+  RealDiskInterface disk;
+  string err;
+  TimeStamp real_mtime = disk.Stat(real_file.c_str(), &err);
+  ASSERT_GT(real_mtime, 0);
+  for (int forget = 0; forget < 2; ++forget) {
+    State state;
+    DepsLog log;
+    DepsLog::PendingLoadPtr pending = DepsLog::Read(kTestFilename);
+    DepsLog::CreateNodes(pending.get(), &state);
+    DepsLog::StartEarlyStats(pending.get(), &disk);
+    EXPECT_EQ(LOAD_SUCCESS,
+              log.Load(std::move(pending), kTestFilename, &state, &err));
+    ASSERT_EQ("", err);
+    // The nodes were created with ids in the order of the log.
+    ASSERT_EQ(3u, log.nodes().size());
+    EXPECT_EQ("out.o", log.nodes()[0]->path());
+    EXPECT_EQ(state.LookupNode("out.o"), log.nodes()[0]);
+    log.WaitForEarlyStats();
+    if (forget)
+      log.ForgetEarlyStats();
+    TimeStamp expected[] = { 0, real_mtime, 0 };
+    for (int id = 0; id < 3; ++id)
+      EXPECT_EQ(forget ? -1 : expected[id], log.TakeEarlyStat(id)) << id;
+  }
+}
+
 }  // anonymous namespace

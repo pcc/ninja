@@ -24,6 +24,7 @@
 #include "load_status.h"
 #include "timestamp.h"
 
+struct DiskInterface;
 struct Node;
 struct State;
 
@@ -111,6 +112,22 @@ struct DepsLog {
   /// Create the nodes for the paths in \a pending, before Load().  This
   /// may run concurrently with parsing the manifest.
   static void CreateNodes(PendingLoad* pending, State* state);
+
+  /// After CreateNodes(), start stat()ing the nodes on other threads, so
+  /// that the results are ready (see TakeEarlyStat()) when scanning.
+  static void StartEarlyStats(PendingLoad* pending,
+                              const DiskInterface* disk_interface);
+
+  /// Return the mtime that the early stat() of the node with the given id
+  /// returned (waiting for it if needed), or -1 if there is none (then
+  /// stat() it as usual).  Must be called at most once per id.
+  TimeStamp TakeEarlyStat(int id);
+
+  /// Don't use early stat() results anymore (if files may have changed).
+  void ForgetEarlyStats();
+
+  /// Wait for the early stat()s to be done.  Used for tests.
+  void WaitForEarlyStats();
   LoadStatus Load(PendingLoadPtr pending, const std::string& path,
                   State* state, std::string* err);
   Deps* GetDeps(Node* node);
@@ -149,6 +166,10 @@ struct DepsLog {
   /// The contents of loaded files, which deps point into.
   struct LoadedFile;
   std::vector<std::unique_ptr<LoadedFile> > loaded_files_;
+
+  /// See StartEarlyStats().
+  struct EarlyStats;
+  std::shared_ptr<EarlyStats> early_stats_;
 
   /// Maps id -> Node.
   std::vector<Node*> nodes_;

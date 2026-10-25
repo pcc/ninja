@@ -50,6 +50,16 @@ struct Node {
   /// Return false on error.
   bool Stat(DiskInterface* disk_interface, std::string* err);
 
+  /// Update the node with the result of a stat() (the mtime, 0 for missing
+  /// files, -1 for errors).  Return false on error.
+  bool UpdateStat(TimeStamp mtime) {
+    mtime_ = mtime;
+    if (mtime_ == -1)
+      return false;
+    exists_ = (mtime_ != 0) ? ExistenceStatusExists : ExistenceStatusMissing;
+    return true;
+  }
+
   /// If the file doesn't exist, set the mtime_ from its dependencies
   void UpdatePhonyMtime(TimeStamp mtime);
 

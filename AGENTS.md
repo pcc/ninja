@@ -101,6 +101,11 @@ Machines used:
   blocks (state.cc AllocateForever). Parse tasks build complete Edge objects;
   the merge appends them (ids) and connects their nodes. The parsed files'
   temporary data is freed on a background thread (RunDetached).
+- The deps log's nodes are stat()ed on other threads while the manifest is
+  still parsed (DepsLog::StartEarlyStats, chunks of 256 re-queued so parse
+  tasks interleave). Results stay in per-id arrays; Prefetch() applies them
+  (DepsLog::TakeEarlyStat). RebuildManifest() forgets them before running
+  any command.
 - Leaf nodes loaded as deps don't get out-edges (flagged instead; dyndep
   recovers them if such a node gains an in-edge).
 
@@ -147,6 +152,7 @@ don't compare exactly.
 | edges built in parse tasks     |   159 |     85 |
 | stat all deps-log nodes first  |   167 |        |
 | faster $in lists (SIMD escape) |   161 |     81 |
+| stat deps-log nodes while parsing |   118 |     74 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat
