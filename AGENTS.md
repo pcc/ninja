@@ -141,6 +141,8 @@ don't compare exactly.
 | ReadFile without copies        |   177 |        |
 | fast path for canonical paths  |   164 |        |
 | edges built in parse tasks     |   159 |     85 |
+| stat all deps-log nodes first  |   167 |        |
+| faster $in lists (SIMD escape) |   161 |     81 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

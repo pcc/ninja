@@ -401,8 +401,44 @@ static inline bool IsKnownWin32SafeCharacter(char ch) {
 }
 
 static inline bool StringNeedsShellEscaping(const string& input) {
-  for (size_t i = 0; i < input.size(); ++i) {
-    if (!IsKnownShellSafeCharacter(input[i])) return true;
+  const char* p = input.data();
+  size_t size = input.size();
+  size_t i = 0;
+  // Safe characters: [A-Za-z], [-./0-9] (0x2D-0x39), '+' and '_'.
+#if defined(NINJA_CHAR_SCAN_NEON)
+  for (; i + 16 <= size; i += 16) {
+    uint8x16_t c = vld1q_u8(reinterpret_cast<const uint8_t*>(p + i));
+    uint8x16_t lower = vorrq_u8(c, vdupq_n_u8(0x20));
+    uint8x16_t safe = vcleq_u8(vsubq_u8(lower, vdupq_n_u8('a')),
+                               vdupq_n_u8('z' - 'a'));
+    safe = vorrq_u8(safe, vcleq_u8(vsubq_u8(c, vdupq_n_u8('-')),
+                                   vdupq_n_u8('9' - '-')));
+    safe = vorrq_u8(safe, vceqq_u8(c, vdupq_n_u8('+')));
+    safe = vorrq_u8(safe, vceqq_u8(c, vdupq_n_u8('_')));
+    if (vminvq_u8(safe) == 0)
+      return true;
+  }
+#elif defined(NINJA_CHAR_SCAN_SSE2)
+  for (; i + 16 <= size; i += 16) {
+    __m128i c = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
+    // Unsigned range checks: x - lo <= hi - lo, as min(x - lo, hi - lo) ==
+    // x - lo.
+    __m128i lower = _mm_sub_epi8(_mm_or_si128(c, _mm_set1_epi8(0x20)),
+                                 _mm_set1_epi8('a'));
+    __m128i safe = _mm_cmpeq_epi8(
+        _mm_min_epu8(lower, _mm_set1_epi8('z' - 'a')), lower);
+    __m128i digits = _mm_sub_epi8(c, _mm_set1_epi8('-'));
+    safe = _mm_or_si128(safe, _mm_cmpeq_epi8(_mm_min_epu8(
+                                  digits, _mm_set1_epi8('9' - '-')),
+                              digits));
+    safe = _mm_or_si128(safe, _mm_cmpeq_epi8(c, _mm_set1_epi8('+')));
+    safe = _mm_or_si128(safe, _mm_cmpeq_epi8(c, _mm_set1_epi8('_')));
+    if (_mm_movemask_epi8(safe) != 0xFFFF)
+      return true;
+  }
+#endif
+  for (; i < size; ++i) {
+    if (!IsKnownShellSafeCharacter(p[i])) return true;
   }
   return false;
 }

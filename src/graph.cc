@@ -962,6 +962,11 @@ void EdgeEnv::AppendVariable(StringPiece var, std::string* out) {
 
 void EdgeEnv::AppendPathList(const Node* const* const span, const size_t size,
                              const char sep, std::string* out) const {
+  // Make room for the paths, if they need no escaping.
+  size_t length = out->size();
+  for (const Node* const* i = span; i != span + size; ++i)
+    length += (*i)->path().size() + 1;
+  out->reserve(length);
   for (const Node* const* i = span; i != span + size; ++i) {
     if (i != span)
       out->push_back(sep);
