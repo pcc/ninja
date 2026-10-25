@@ -914,4 +914,121 @@ TEST_F(DepsLogTest, EarlyStats) {
   }
 }
 
+/// The checks of the original, serial reading of a deps log: returns the
+/// number of valid records' paths and the size of the valid part of \a log
+/// (or -1 if it is all valid).
+void ReferenceRead(const string& log, int* path_count, long* valid_size) {
+  const char* data = log.data();
+  const char* end = data + log.size();
+  const char* p = data + 16;  // The signature and version.
+  *path_count = 0;
+  *valid_size = -1;
+  for (;;) {
+    unsigned size;
+    if (end - p < 4)
+      return;
+    memcpy(&size, p, 4);
+    bool is_deps = (size >> 31) != 0;
+    size &= 0x7FFFFFFF;
+    const char* buf = p + 4;
+    bool ok = size <= (1 << 19) - 1 && end - buf >= (ptrdiff_t)size;
+    if (ok && is_deps) {
+      ok = size % 4 == 0 && size >= 12;
+      for (unsigned i = 0; ok && i < size / 4; ++i) {
+        unsigned id;
+        memcpy(&id, buf + 4 * i, 4);
+        if ((i == 0 || i >= 3) && id >= (unsigned)*path_count)
+          ok = false;
+      }
+    } else if (ok) {
+      unsigned checksum = 0;
+      ok = size > 4;
+      if (ok)
+        memcpy(&checksum, buf + size - 4, 4);
+      ok = ok && ~checksum == (unsigned)*path_count;
+    }
+    if (!ok) {
+      *valid_size = static_cast<long>(p - data);
+      return;
+    }
+    *path_count += !is_deps;
+    p = buf + size;
+  }
+}
+
+// Reading a big log (in parallel) finds the same records as reading it in
+// order, despite corruptions.
+TEST_F(DepsLogTest, BigLogCorruptions) {
+  {
+    State state;
+    DepsLog log;
+    string err;
+    ASSERT_TRUE(log.OpenForWrite(kTestFilename, &err));
+    vector<Node*> headers;
+    for (int i = 0; i < 3000; ++i)
+      headers.push_back(state.GetNode("include/header" + to_string(i) + ".h",
+                                      0));
+    for (int i = 0; i < 5000; ++i) {
+      vector<Node*> deps;
+      for (int j = 0; j < 300; ++j)
+        deps.push_back(headers[(i * 7 + j * 13) % headers.size()]);
+      ASSERT_TRUE(log.RecordDeps(state.GetNode("out" + to_string(i) + ".o", 0),
+                                 i + 1, deps));
+    }
+    log.Close();
+  }
+  RealDiskInterface disk;
+  string err, contents;
+  ASSERT_EQ(FileReader::Okay, disk.ReadFile(kTestFilename, &contents, &err));
+  ASSERT_GT(contents.size(), 5u << 20);
+
+  // The positions of the records.
+  vector<size_t> records;
+  for (size_t pos = 16; pos + 4 <= contents.size();) {
+    records.push_back(pos);
+    unsigned size;
+    memcpy(&size, &contents[pos], 4);
+    pos += 4 + (size & 0x7FFFFFFF);
+  }
+
+  unsigned seed = 1;
+  auto random = [&seed]() {
+    seed = seed * 1103515245 + 12345;
+    return (seed >> 8) & 0xFFFFFF;
+  };
+  for (int round = 0; round < 40; ++round) {
+    string bad = contents;
+    if (round > 0) {
+      // Corrupt a few words, or (sometimes) truncate.
+      for (int i = 0; i < 1 + round % 3; ++i) {
+        size_t pos = 16 + ((random() * 64 + random()) % (bad.size() - 16));
+        pos &= ~size_t(3);
+        // Often in the size of a record, or in a path's checksum.
+        if (i % 2 == 0)
+          pos = records[random() % records.size()];
+        if (i == 2)
+          pos -= 4;
+        unsigned value = round % 2 ? random() : 0x7FFFFFFF & random() % 64;
+        memcpy(&bad[pos], &value, 4);
+      }
+      if (round % 5 == 0)
+        bad.resize(bad.size() - random() % (bad.size() / 2));
+    }
+    int expected_paths;
+    long expected_size;
+    ReferenceRead(bad, &expected_paths, &expected_size);
+    ASSERT_TRUE(disk.WriteFile(kTestFilename, bad, false));
+
+    State state;
+    DepsLog log;
+    EXPECT_TRUE(log.Load(kTestFilename, &state, &err));
+    EXPECT_EQ(expected_paths, (int)log.nodes().size()) << round;
+    string after;
+    ASSERT_EQ(FileReader::Okay, disk.ReadFile(kTestFilename, &after, &err));
+    EXPECT_EQ(expected_size < 0 ? (long)bad.size() : expected_size,
+              (long)after.size())
+        << round;
+  }
+}
+
 }  // anonymous namespace

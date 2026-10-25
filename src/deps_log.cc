@@ -18,6 +18,7 @@
 #include <errno.h>
 
 #include <algorithm>
+#include <atomic>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -299,6 +300,8 @@ struct DepsLog::PendingLoad {
     bool is_deps;
     /// The offset of the record in the file.
     long offset;
+    /// The number of path records up to this one (included).
+    unsigned path_count;
   };
   std::vector<Record> records;
   /// The nodes for path records (null for deps records), if CreateNodes()
@@ -315,6 +318,87 @@ struct DepsLog::PendingLoad {
 void DepsLog::PendingLoadDeleter::operator()(PendingLoad* pending) const {
   delete pending;
 }
+
+namespace {
+
+/// The records found by WalkRecords().
+struct RecordWalk {
+  std::vector<DepsLog::PendingLoad::Record> records;
+  /// Where the walk stopped.
+  const char* end = nullptr;
+  /// Whether it stopped at a record that is not valid.
+  bool failed = false;
+};
+
+/// Check the parts of the record at \a p (before \a end) that don't depend
+/// on the other records.  Returns its size and type, or false.
+bool CheckRecord(const char* p, const char* end, unsigned* size,
+                 bool* is_deps) {
+  if (end - p < 4)
+    return false;
+  memcpy(size, p, 4);
+  *is_deps = (*size >> 31) != 0;
+  *size &= 0x7FFFFFFF;
+  if (*size > kMaxRecordSize || end - (p + 4) < (ptrdiff_t)*size)
+    return false;
+  if (*is_deps)
+    return (*size % 4) == 0 && *size >= 12;
+  // A path and its checksum.
+  return *size > 4;
+}
+
+/// Walk the records from \a p, those that start before \a limit, adding
+/// them to \a walk with the number of path records so far in that walk.
+void WalkRecords(const char* data, const char* p, const char* limit,
+                 const char* end, RecordWalk* walk) {
+  unsigned path_count = 0;
+  while (p < limit) {
+    unsigned size;
+    bool is_deps;
+    if (!CheckRecord(p, end, &size, &is_deps)) {
+      walk->failed = end - p >= 4;
+      break;
+    }
+    path_count += !is_deps;
+    walk->records.push_back(
+        { p + 4, size, is_deps, static_cast<long>(p - data), path_count });
+    p += 4 + size;
+  }
+  walk->end = p;
+}
+
+/// Find the first position in [\a begin, \a chunk_end) that starts a chain
+/// of records that look valid (with consecutive checksums), or null.
+const char* FindRecordChain(const char* begin, const char* chunk_end,
+                            const char* end) {
+  const int kChainLength = 8;
+  for (const char* start = begin; start < chunk_end; start += 4) {
+    const char* p = start;
+    int length = 0;
+    bool have_checksum = false;
+    unsigned last_checksum = 0;
+    for (; length < kChainLength && p != end; ++length) {
+      unsigned size;
+      bool is_deps;
+      if (!CheckRecord(p, end, &size, &is_deps))
+        break;
+      if (!is_deps) {
+        unsigned checksum;
+        memcpy(&checksum, p + 4 + size - 4, 4);
+        if (have_checksum && ~checksum != ~last_checksum + 1)
+          break;
+        have_checksum = true;
+        last_checksum = checksum;
+      }
+      p += 4 + size;
+    }
+    if (length == kChainLength || p == end)
+      return start;
+  }
+  return nullptr;
+}
+
+}  // namespace
 
 DepsLog::PendingLoadPtr DepsLog::Read(const string& path) {
   PendingLoadPtr pending(new PendingLoad);
@@ -335,64 +419,146 @@ DepsLog::PendingLoadPtr DepsLog::Read(const string& path) {
     return pending;
 
   // Records are 4-byte aligned, as is the start of the data.
-  const char* p = data + kFileSignatureSize + 4;
-  // The number of path records so far, i.e. the next node id.
+  const char* first = data + kFileSignatureSize + 4;
+  std::vector<PendingLoad::Record>& records = pending->records;
+  // Finding a record needs the previous one: walking through a big log is
+  // a chain of cache misses.  So chunks of the log are walked in parallel,
+  // each from the first position where a few records in a row look valid,
+  // and the walks are joined where the true chain of records (from the
+  // start) meets them.
+  const size_t kMinChunkSize = 1 << 20;
+  size_t chunk_count =
+      std::min<size_t>(TaskGroup::Concurrency() * 2,
+                       (end - first) / kMinChunkSize + 1);
+  std::vector<RecordWalk> walks(chunk_count);
+  size_t chunk_size = ((end - first) / chunk_count + 3) & ~size_t(3);
+  ParallelFor(chunk_count, 1, [&](size_t begin, size_t end_chunk) {
+    for (size_t i = begin; i < end_chunk; ++i) {
+      const char* chunk_begin = first + i * chunk_size;
+      const char* chunk_end = i + 1 == chunk_count
+                                  ? end
+                                  : first + (i + 1) * chunk_size;
+      const char* start =
+          i == 0 ? first : FindRecordChain(chunk_begin, chunk_end, end);
+      if (start)
+        WalkRecords(data, start, chunk_end, end, &walks[i]);
+    }
+  });
+
+  // Join the walks.  The true chain is at p.  The records of the true chain
+  // are segments of the walks, and records walked here, in order.
+  struct Segment {
+    const std::vector<PendingLoad::Record>* records;
+    size_t begin, end;
+    /// What to add to the records' path counts.
+    unsigned path_offset;
+  };
+  std::vector<Segment> segments;
+  RecordWalk walked;
+  walked.records.reserve(chunk_count);
+  const char* p = first;
   unsigned path_count = 0;
-  for (;;) {
-    pending->valid_size = p - data;
-    unsigned size;
-    if (end - p < (ptrdiff_t)sizeof(size))
-      break;
-    memcpy(&size, p, sizeof(size));
-    bool is_deps = (size >> 31) != 0;
-    size = size & 0x7FFFFFFF;
-
-    const char* buf = p + sizeof(size);
-    if (size > kMaxRecordSize || end - buf < (ptrdiff_t)size) {
-      pending->read_failed = true;
-      break;
+  bool failed = false;
+  for (size_t i = 0; i < chunk_count && !failed && p != end; ++i) {
+    const char* chunk_end =
+        i + 1 == chunk_count ? end : first + (i + 1) * chunk_size;
+    const RecordWalk& walk = walks[i];
+    for (;;) {
+      auto found = std::lower_bound(
+          walk.records.begin(), walk.records.end(), p,
+          [](const PendingLoad::Record& record, const char* pos) {
+            return record.data - 4 < pos;
+          });
+      if (found != walk.records.end() && found->data - 4 == p) {
+        // The chains meet: take the rest of this walk.
+        unsigned before = found == walk.records.begin()
+                              ? 0
+                              : (found - 1)->path_count;
+        segments.push_back({ &walk.records,
+                             size_t(found - walk.records.begin()),
+                             walk.records.size(), path_count - before });
+        path_count += walk.records.back().path_count - before;
+        p = walk.end;
+        failed = walk.failed;
+        break;
+      }
+      if (p >= chunk_end || p == end)
+        break;
+      // Walk the true chain by one record.
+      RecordWalk step;
+      WalkRecords(data, p, p + 1, end, &step);
+      p = step.end;
+      if (step.records.empty()) {
+        failed = step.failed;
+        break;
+      }
+      path_count += !step.records[0].is_deps;
+      if (segments.empty() || segments.back().records != &walked.records)
+        segments.push_back({ &walked.records, walked.records.size(),
+                             walked.records.size(), 0 });
+      walked.records.push_back(step.records[0]);
+      walked.records.back().path_count = path_count;
+      ++segments.back().end;
     }
-
-    if (is_deps) {
-      if ((size % 4) != 0 || size < 12) {
-        pending->read_failed = true;
-        break;
+  }
+  pending->read_failed = failed;
+  pending->valid_size = static_cast<long>(p - data);
+  size_t record_count = 0;
+  std::vector<size_t> segment_starts;
+  for (const Segment& segment : segments) {
+    segment_starts.push_back(record_count);
+    record_count += segment.end - segment.begin;
+  }
+  records.resize(record_count);
+  ParallelFor(segments.size(), 1, [&](size_t from, size_t to) {
+    for (size_t i = from; i < to; ++i) {
+      const Segment& segment = segments[i];
+      PendingLoad::Record* out = &records[segment_starts[i]];
+      for (size_t j = segment.begin; j < segment.end; ++j, ++out) {
+        *out = (*segment.records)[j];
+        out->path_count += segment.path_offset;
       }
-      const int* deps_data = reinterpret_cast<const int*>(buf);
-      // A truncated or concurrent write can leave a deps record whose
-      // out_id was never assigned a path. Truncate here; storing it
-      // made Recompact index nodes_ out of bounds.
-      // All ids must refer to paths that precede the record.  (Negative
-      // ids become large as unsigned.)
-      unsigned max_id = static_cast<unsigned>(deps_data[0]);
-      int deps_count = (size / 4) - 3;
-      deps_data += 3;
-      for (int i = 0; i < deps_count; ++i)
-        max_id = std::max(max_id, static_cast<unsigned>(deps_data[i]));
-      if (max_id >= path_count) {
-        pending->read_failed = true;
-        break;
-      }
-    } else {
-      int path_size = size - 4;
-      if (path_size <= 0) {
-        pending->read_failed = true;
-        break;
-      }
-      // Check that the expected index matches the actual index. This can only
-      // happen if two ninja processes write to the same deps log concurrently.
-      // (This uses unary complement to make the checksum look less like a
-      // dependency record entry.)
-      unsigned checksum;
-      memcpy(&checksum, buf + size - 4, 4);
-      if (~checksum != path_count) {
-        pending->read_failed = true;
-        break;
-      }
-      ++path_count;
     }
-    pending->records.push_back({ buf, size, is_deps, p - data });
-    p = buf + size;
+  });
+
+  // Check the path records' checksums: their expected index must match
+  // their actual index. This can only happen if two ninja processes write to
+  // the same deps log concurrently.  (This uses unary complement to make the
+  // checksum look less like a dependency record entry.)
+  // A truncated or concurrent write can also leave a deps record whose out_id
+  // was never assigned a path.  Storing it made Recompact index nodes_ out of
+  // bounds.  All ids must refer to paths that precede the record.  (Negative
+  // ids become large as unsigned.)  Truncate at the first bad record.
+  std::atomic<size_t> first_bad{records.size()};
+  ParallelFor(records.size(), 1024, [&](size_t from, size_t to) {
+    for (size_t i = from; i < to; ++i) {
+      const PendingLoad::Record& record = records[i];
+      bool bad;
+      if (record.is_deps) {
+        const unsigned* ids = reinterpret_cast<const unsigned*>(record.data);
+        unsigned max_id = ids[0];
+        unsigned count = (record.size / 4) - 3;
+        ids += 3;
+        for (unsigned j = 0; j < count; ++j)
+          max_id = std::max(max_id, ids[j]);
+        bad = max_id >= record.path_count;
+      } else {
+        unsigned checksum;
+        memcpy(&checksum, record.data + record.size - 4, 4);
+        bad = ~checksum != record.path_count - 1;
+      }
+      if (bad) {
+        size_t old = first_bad.load(std::memory_order_relaxed);
+        while (i < old && !first_bad.compare_exchange_weak(old, i)) {
+        }
+        return;
+      }
+    }
+  });
+  if (first_bad < records.size()) {
+    pending->read_failed = true;
+    pending->valid_size = records[first_bad].offset;
+    records.resize(first_bad);
   }
   return pending;
 }
@@ -466,18 +632,28 @@ bool DepsLog::LoadWithoutSideEffects(PendingLoadPtr* pending_ptr) {
     return false;
   int unique_dep_record_count = 0;
   int total_dep_record_count = 0;
-  for (size_t i = 0; i < pending->records.size(); ++i) {
-    const PendingLoad::Record& record = pending->records[i];
-    if (record.is_deps) {
+  // Create the Deps on all threads: that reads the records.
+  const std::vector<PendingLoad::Record>& records = pending->records;
+  std::vector<std::pair<int, Deps*> > created(records.size());
+  ParallelFor(records.size(), 1024, [&](size_t begin, size_t end) {
+    for (size_t i = begin; i < end; ++i) {
+      const PendingLoad::Record& record = records[i];
+      if (!record.is_deps)
+        continue;
       const int* deps_data = reinterpret_cast<const int*>(record.data);
-      int out_id = deps_data[0];
       TimeStamp mtime =
           (TimeStamp)(((uint64_t)(unsigned int)deps_data[2] << 32) |
                       (uint64_t)(unsigned int)deps_data[1]);
-      Deps* deps = new Deps(mtime, (record.size / 4) - 3, deps_data + 3,
-                            &nodes_);
+      created[i] = std::make_pair(
+          deps_data[0],
+          new Deps(mtime, (record.size / 4) - 3, deps_data + 3, &nodes_));
+    }
+  });
+  for (size_t i = 0; i < records.size(); ++i) {
+    const PendingLoad::Record& record = records[i];
+    if (record.is_deps) {
       total_dep_record_count++;
-      if (!UpdateDeps(out_id, deps))
+      if (!UpdateDeps(created[i].first, created[i].second))
         ++unique_dep_record_count;
     } else {
       Node* node = pending->nodes[i];
@@ -489,6 +665,8 @@ bool DepsLog::LoadWithoutSideEffects(PendingLoadPtr* pending_ptr) {
         for (Deps* deps : deps_)
           delete deps;
         deps_.clear();
+        for (size_t j = i + 1; j < records.size(); ++j)
+          delete created[j].second;
         return false;
       }
       node->set_id(static_cast<int>(nodes_.size()));

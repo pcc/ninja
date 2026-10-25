@@ -110,8 +110,13 @@ Machines used:
   side effects (corrupt log). This starts right away, assuming no builddir;
   if the manifest sets one, DepsLog::UndoSpeculativeLoad() removes the
   (still provisional) nodes it created and forgets the log.
-  (Parallelizing the deps log's checks/loading further was tried: it only
-  competes with the parse.)
+  `DepsLog::Read()` walks the records in parallel: finding a record needs
+  the previous one, so a serial walk is a chain of cache misses (~9 ms for
+  63 MB). Chunks are walked from the first position where 8 records in a
+  row look valid (consecutive checksums), and joined where the true chain
+  meets them (else it's walked serially). The checksum and id checks run
+  in parallel afterwards; `DepsLogTest.BigLogCorruptions` compares the
+  result with a serial reference.
 - The deps log's nodes are stat()ed on other threads while the manifest is
   still parsed (DepsLog::StartEarlyStats, chunks of 256 re-queued so parse
   tasks interleave). Results stay in per-id arrays; Prefetch() applies them
@@ -186,6 +191,7 @@ don't compare exactly.
 | (small cleanups: log entries, name masks, command buffer) |   111 |     67 |
 | spin locks for the node map    |   107 |     62 |
 | manifest cache                 |   107 |     58 |
+| parallel deps log walk         |   102 |     55 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):
