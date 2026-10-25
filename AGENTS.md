@@ -132,7 +132,9 @@ Machines used:
   saved with the status (dev, ino, size, mtime, ctime) of every manifest
   file; it's used while they all have the same status. Files changed less
   than 2 s before saving make it skip saving (timestamp granularity).
-  Records are fixed-size arrays used in place (checked in parallel first),
+  Records are fixed-size arrays used in place (checked in parallel first;
+  nodes have their path hash and their in/out edges, so they're connected
+  in parallel by node),
   strings are deduplicated (the CMake cache is 22 MB, not 120). Loading
   takes ~25 ms of wall time on arm64 (node creation dominates); saving
   costs ~50 ms on a cache miss. The cache also has what the scan needs
@@ -196,6 +198,8 @@ don't compare exactly.
 | manifest cache                 |   107 |     58 |
 | parallel deps log walk         |   102 |     55 |
 | scan bindings in the cache     |    89 |     52 |
+| (parallel build log parse)     |    84 |   (~0) |
+| nodes' edges in the cache      |    84 |     50 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):

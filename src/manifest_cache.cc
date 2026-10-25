@@ -42,7 +42,8 @@
 // bytes:
 // - The strings that the records refer to (as an offset and a length),
 //   deduplicated.
-// - The nodes: their paths and slash bits.
+// - The nodes: their paths, slash bits and edges, and the array of the
+//   nodes' edges.
 // - The scopes (BindingEnvs), parents first, the top-level scope first,
 //   and the bindings of the scopes.
 // - The rules (except the phony rule), their bindings, and the tokens of
@@ -57,7 +58,7 @@
 namespace {
 
 const char kMagic[] = "# ninja manifest cache\n";
-const uint32_t kFormatVersion = 3;
+const uint32_t kFormatVersion = 4;
 const uint32_t kNone = 0xFFFFFFFF;
 /// Indices of the built-in pools.
 const uint32_t kDefaultPool = 0;
@@ -67,8 +68,21 @@ struct StringRef {
   uint32_t offset, size;
 };
 struct NodeRecord {
+  enum Flags {
+    kDyndepPending = 1,
+  };
   StringRef path;
   uint64_t slash_bits;
+  /// PathMap::Hash() of the path.
+  uint64_t hash;
+  /// The index of the node's in-edge, or kNone.
+  uint32_t in_edge;
+  /// The ranges of the node's out-edges ([out_begin, out_end)) and
+  /// validation out-edges ([out_end, validations_end)) in the array of the
+  /// nodes' edges.
+  uint32_t out_begin, out_end, validations_end;
+  uint32_t flags;
+  uint32_t padding;
 };
 struct BindingRecord {
   StringRef key, value;
@@ -217,11 +231,12 @@ int64_t NowNanoseconds() {
       .count();
 }
 
-/// Check \a count items in parallel with \a check(i), which returns whether
-/// the item is valid.
-bool CheckAll(size_t count, const std::function<bool(size_t)>& check) {
+/// Check \a count items in parallel (in chunks of \a grain) with
+/// \a check(i), which returns whether the item is valid.
+bool CheckAll(size_t count, size_t grain,
+              const std::function<bool(size_t)>& check) {
   std::atomic<bool> ok{true};
-  ParallelFor(count, 4096, [&](size_t begin, size_t end) {
+  ParallelFor(count, grain, [&](size_t begin, size_t end) {
     for (size_t i = begin; i < end && ok.load(std::memory_order_relaxed);
          ++i) {
       if (!check(i))
@@ -290,12 +305,12 @@ bool ManifestCache::Save(const std::string& path,
   // are referred to by edges (and others, created concurrently for the deps
   // log, must not be included).
   emhash8::HashMap<const Node*, uint32_t> node_indices;
-  std::vector<NodeRecord> nodes;
+  std::vector<const Node*> node_list;
   auto node_index = [&](const Node* node) {
     auto inserted =
-        node_indices.emplace(node, static_cast<uint32_t>(nodes.size()));
+        node_indices.emplace(node, static_cast<uint32_t>(node_list.size()));
     if (inserted.second)
-      nodes.push_back({ string_ref(node->path(), false), node->slash_bits() });
+      node_list.push_back(node);
     return inserted.first->second;
   };
   emhash8::HashMap<const BindingEnv*, uint32_t> env_indices;
@@ -336,6 +351,31 @@ bool ManifestCache::Save(const std::string& path,
   std::vector<uint32_t> defaults;
   for (const Node* node : state.defaults_)
     defaults.push_back(node_index(node));
+
+  std::vector<NodeRecord> nodes(node_list.size());
+  std::vector<uint32_t> node_edges;
+  auto edge_index = [&](const Edge* edge) {
+    if (edge->id_ >= state.edges_.size() || state.edges_[edge->id_] != edge)
+      too_big = true;  // Not expected.
+    return static_cast<uint32_t>(edge->id_);
+  };
+  for (size_t i = 0; i < node_list.size(); ++i) {
+    const Node* node = node_list[i];
+    NodeRecord& record = nodes[i];
+    record.path = string_ref(node->path(), false);
+    record.slash_bits = node->slash_bits();
+    record.hash = PathMap::Hash(node->path());
+    record.in_edge = node->in_edge() ? edge_index(node->in_edge()) : kNone;
+    record.out_begin = static_cast<uint32_t>(node_edges.size());
+    for (const Edge* edge : node->out_edges())
+      node_edges.push_back(edge_index(edge));
+    record.out_end = static_cast<uint32_t>(node_edges.size());
+    for (const Edge* edge : node->validation_out_edges())
+      node_edges.push_back(edge_index(edge));
+    record.validations_end = static_cast<uint32_t>(node_edges.size());
+    record.flags = node->dyndep_pending() ? NodeRecord::kDyndepPending : 0;
+    record.padding = 0;
+  }
 
   std::vector<EnvRecord> env_records;
   std::vector<BindingRecord> bindings;
@@ -429,11 +469,12 @@ bool ManifestCache::Save(const std::string& path,
   });
   for (size_t i = 0; i < edges.size(); ++i)
     scan_bindings[i].depfile = string_ref(depfiles[i], false);
-  if (too_big || edge_nodes.size() >= kNone)
+  if (too_big || edge_nodes.size() >= kNone || node_edges.size() >= kNone)
     return false;
 
   w.Bytes(strings);
   w.Array(nodes);
+  w.Array(node_edges);
   w.Array(env_records);
   w.Array(bindings);
   w.Array(rules);
@@ -503,7 +544,7 @@ bool ManifestCache::Load(const std::string& path,
   r.Align();
   if (!r.ok || files.empty())
     return false;
-  if (!CheckAll(files.size(), [&](size_t i) {
+  if (!CheckAll(files.size(), 8, [&](size_t i) {
         FileStatus status;
         return FileStatus::Get(files[i].first, &status) &&
                status == files[i].second;
@@ -515,6 +556,8 @@ bool ManifestCache::Load(const std::string& path,
       rule_binding_count, token_count, pool_count, edge_count,
       edge_node_count, default_count;
   const NodeRecord* nodes = r.Array<NodeRecord>(&node_count);
+  size_t node_edge_count;
+  const uint32_t* node_edges = r.Array<uint32_t>(&node_edge_count);
   const EnvRecord* env_records = r.Array<EnvRecord>(&env_count);
   const BindingRecord* bindings = r.Array<BindingRecord>(&binding_count);
   const RuleRecord* rules = r.Array<RuleRecord>(&rule_count);
@@ -563,18 +606,25 @@ bool ManifestCache::Load(const std::string& path,
         state->LookupPool(str(pools[i].name).AsString()))
       return false;
   }
-  if (!CheckAll(node_count, [&](size_t i) {
-        return string_ok(nodes[i].path) && nodes[i].path.size != 0;
+  if (!CheckAll(node_count, 1024, [&](size_t i) {
+        const NodeRecord& node = nodes[i];
+        return string_ok(node.path) && node.path.size != 0 &&
+               (node.in_edge < edge_count || node.in_edge == kNone) &&
+               node.out_begin <= node.out_end &&
+               node.out_end <= node.validations_end &&
+               node.validations_end <= node_edge_count;
       }) ||
-      !CheckAll(env_count, [&](size_t i) {
+      !CheckAll(node_edge_count, 4096,
+                [&](size_t i) { return node_edges[i] < edge_count; }) ||
+      !CheckAll(env_count, 1024, [&](size_t i) {
         const EnvRecord& env = env_records[i];
         return (i == 0 || env.parent < i) && env.begin <= env.end &&
                env.end <= binding_count;
       }) ||
-      !CheckAll(binding_count, [&](size_t i) {
+      !CheckAll(binding_count, 4096, [&](size_t i) {
         return string_ok(bindings[i].key) && string_ok(bindings[i].value);
       }) ||
-      !CheckAll(edge_count, [&](size_t i) {
+      !CheckAll(edge_count, 1024, [&](size_t i) {
         const EdgeRecord& edge = edges[i];
         uint64_t count = static_cast<uint64_t>(edge.outs) + edge.ins +
                          edge.validations;
@@ -588,9 +638,9 @@ bool ManifestCache::Load(const std::string& path,
                count <= edge_node_count - edge.nodes &&
                string_ok(scan_bindings[i].depfile);
       }) ||
-      !CheckAll(edge_node_count,
+      !CheckAll(edge_node_count, 4096,
                 [&](size_t i) { return edge_nodes[i] < node_count; }) ||
-      !CheckAll(default_count,
+      !CheckAll(default_count, 4096,
                 [&](size_t i) { return defaults[i] < node_count; }))
     return false;
 
@@ -639,10 +689,11 @@ bool ManifestCache::Load(const std::string& path,
 
   // The nodes, which may already exist if the deps log created them.
   std::vector<Node*> node_ptrs(node_count);
+  state->paths_.Reserve(state->paths_.size() + node_count);
   ParallelFor(node_count, 1024, [&](size_t begin, size_t end) {
     for (size_t i = begin; i < end; ++i)
-      node_ptrs[i] =
-          state->paths_.GetOrCreate(str(nodes[i].path), nodes[i].slash_bits);
+      node_ptrs[i] = state->paths_.GetOrCreate(
+          str(nodes[i].path), nodes[i].hash, nodes[i].slash_bits, false);
   });
 
   // The edges.
@@ -685,36 +736,24 @@ bool ManifestCache::Load(const std::string& path,
   for (Edge* edge : edge_ptrs)
     state->AppendEdge(edge);
 
-  // Connect the nodes to the edges, in the order of the edges.  Split the
-  // work by node, so that each node's edges are added in order.
-  size_t buckets = TaskGroup::Concurrency();
-  ParallelFor(buckets, 1, [&](size_t begin, size_t end) {
-    for (size_t bucket = begin; bucket < end; ++bucket) {
-      for (size_t i = 0; i < edge_count; ++i) {
-        Edge* edge = edge_ptrs[i];
-        const EdgeRecord& record = edges[i];
-        const uint32_t* indices = edge_nodes + record.nodes;
-        size_t count = record.outs + record.ins + record.validations;
-        for (size_t n = 0; n < count; ++n) {
-          uint32_t index = indices[n];
-          if (index % buckets != bucket)
-            continue;
-          Node* node = node_ptrs[index];
-          if (n < record.outs)
-            node->set_in_edge(edge);
-          else if (n < record.outs + record.ins)
-            node->AddOutEdge(edge);
-          else
-            node->AddValidationOutEdge(edge);
-          node->set_generated_by_dep_loader(false);
-          // Nodes that the deps log created have provisional slash bits.
-          if (node->slash_bits_provisional()) {
-            node->set_slash_bits(nodes[index].slash_bits);
-            node->set_slash_bits_provisional(false);
-          }
-        }
-        if (record.dyndep != kNone && record.dyndep % buckets == bucket)
-          edge->dyndep_->set_dyndep_pending(true);
+  // Connect the nodes to the edges.
+  ParallelFor(node_count, 1024, [&](size_t begin, size_t end) {
+    for (size_t i = begin; i < end; ++i) {
+      const NodeRecord& record = nodes[i];
+      Node* node = node_ptrs[i];
+      if (record.in_edge != kNone)
+        node->set_in_edge(edge_ptrs[record.in_edge]);
+      for (uint32_t j = record.out_begin; j < record.out_end; ++j)
+        node->AddOutEdge(edge_ptrs[node_edges[j]]);
+      for (uint32_t j = record.out_end; j < record.validations_end; ++j)
+        node->AddValidationOutEdge(edge_ptrs[node_edges[j]]);
+      if (record.flags & NodeRecord::kDyndepPending)
+        node->set_dyndep_pending(true);
+      node->set_generated_by_dep_loader(false);
+      // Nodes that the deps log created have provisional slash bits.
+      if (node->slash_bits_provisional()) {
+        node->set_slash_bits(record.slash_bits);
+        node->set_slash_bits_provisional(false);
       }
     }
   });

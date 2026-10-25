@@ -119,6 +119,9 @@ struct PathMap {
   size_t size() const;
   size_t bucket_count() const;
 
+  /// Make room for \a count nodes in total.
+  void Reserve(size_t count);
+
   /// Call \a f for all nodes, in an unspecified order (but not
   /// concurrently with insertions).
   template <typename F>

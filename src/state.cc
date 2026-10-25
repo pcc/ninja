@@ -171,6 +171,15 @@ size_t PathMap::size() const {
   return size;
 }
 
+void PathMap::Reserve(size_t count) {
+  // Hashes spread evenly over the shards.
+  size_t per_shard = count / (sizeof(shards_) / sizeof(shards_[0])) * 5 / 4;
+  for (Shard& shard : shards_) {
+    std::lock_guard<SpinLock> lock(shard.mutex);
+    shard.map.reserve(static_cast<decltype(shard.map)::size_type>(per_shard));
+  }
+}
+
 size_t PathMap::bucket_count() const {
   size_t count = 0;
   for (const Shard& shard : shards_)
