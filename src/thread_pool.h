@@ -46,6 +46,14 @@ struct TaskGroup {
   std::atomic<size_t> pending_{0};
 };
 
+/// Run queued tasks on the calling thread until \a done returns true.
+/// Whatever makes \a done return true must call NotifyTaskWaiters()
+/// afterwards.
+void RunTasksUntil(const std::function<bool()>& done);
+
+/// Wake up threads in RunTasksUntil() to check their condition again.
+void NotifyTaskWaiters();
+
 /// Run \a fn(begin, end) over subranges of [0, \a count) of about \a grain
 /// items on the thread pool, and wait for all of them.
 void ParallelFor(size_t count, size_t grain,

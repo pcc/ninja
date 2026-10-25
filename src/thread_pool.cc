@@ -110,6 +110,14 @@ void TaskGroup::Wait() {
       [this] { return pending_.load(std::memory_order_acquire) == 0; });
 }
 
+void RunTasksUntil(const std::function<bool()>& done) {
+  ThreadPool::Get().RunUntil(done);
+}
+
+void NotifyTaskWaiters() {
+  ThreadPool::Get().NotifyAll();
+}
+
 size_t TaskGroup::Concurrency() {
   return ThreadPool::Get().concurrency();
 }

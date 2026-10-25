@@ -36,6 +36,9 @@ struct FileReader {
   /// On error, return another Status and fill |err|.
   virtual Status ReadFile(const std::string& path, std::string* contents,
                           std::string* err) = 0;
+
+  /// Whether ReadFile() may be called from several threads at once.
+  virtual bool IsReadFileThreadSafe() const { return false; }
 };
 
 /// Interface for accessing the disk.
@@ -78,6 +81,7 @@ struct RealDiskInterface : public DiskInterface {
   virtual ~RealDiskInterface() {}
   TimeStamp Stat(const std::string& path, std::string* err) const override;
   bool IsStatThreadSafe() const override;
+  bool IsReadFileThreadSafe() const override { return true; }
   bool MakeDir(const std::string& path) override;
   bool WriteFile(const std::string& path, const std::string& contents,
                  bool crlf_on_windows) override;

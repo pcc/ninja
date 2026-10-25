@@ -62,6 +62,26 @@ Machines used:
 - x86-64: `ssh x86` companion VM, AMD EPYC, 16 vCPUs, 16 GB RAM. Copy the
   tree over with `tar cf - --exclude=.git . | ssh x86 'cd /root/ninja && tar xf -'`.
 
+## Design notes
+
+- `src/thread_pool.*`: process-wide pool (GetProcessorCount() threads incl.
+  the caller); `TaskGroup`, `ParallelFor`, `RunTasksUntil`. Workers block
+  all signals (the main loop relies on SIGCHLD/SIGINT interrupting ppoll).
+- `src/char_scan.h`: `FindFirstOf<chars...>()` (NEON/SSE2/scalar); buffers
+  need `kCharScanPadding` readable bytes after the terminating NUL.
+- Manifest parser (`src/manifest_parser.cc`, see the overview comment
+  there): files are lexed by a reimplementation of `lexer.in.cc` (which
+  remains for dyndep files) and their effects on the State are recorded as
+  items, merged in order on one thread. Subninjas are processed on other
+  threads when no definitions follow them in the parent scopes. Error
+  messages and positions are the same as before; the per-include-depth
+  `ninja_required_version` state for `$^` is emulated.
+- `DependencyScan::Prefetch()` (graph.cc): parallel stat + binding
+  evaluation before the serial scan; only with thread-safe Stat() and
+  without `-d explain`.
+- Leaf nodes loaded as deps don't get out-edges (flagged instead; dyndep
+  recovers them if such a node gains an in-edge).
+
 ## Results
 
 Median time to first command (ms), tree on tmpfs. Run-to-run noise is
@@ -80,6 +100,7 @@ don't compare exactly.
 | no out-edges for leaf deps     |   539 |    517 |
 | append-based evaluation        |   496 |    500 |
 | parallel scan prefetch         |   428 |    329 |
+| new lexer, parallel subninjas  |   327 |    251 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat
