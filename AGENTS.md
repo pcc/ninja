@@ -121,8 +121,8 @@ Machines used:
   in parallel afterwards; `DepsLogTest.BigLogCorruptions` compares the
   result with a serial reference.
 - The deps log's nodes are stat()ed on other threads while the manifest is
-  still parsed (DepsLog::StartEarlyStats, chunks of 256 re-queued so parse
-  tasks interleave). Results stay in per-id arrays; Prefetch() applies them
+  still loaded (DepsLog::StartEarlyStats, one task per thread, chunks of 256
+  re-queued so other tasks interleave). Results stay in per-id arrays; Prefetch() applies them
   (DepsLog::TakeEarlyStat). RebuildManifest() forgets them before running
   any command.
 - `BindingEnv` stores bindings as (key, value) StringPieces in a small
@@ -205,6 +205,7 @@ don't compare exactly.
 | nodes' edges in the cache      |    84 |     50 |
 | ParallelFor waits, doesn't steal |    79 |     49 |
 | parallel edge collection       |    85 |   48.6 |
+| early stats on all threads     |    87 |     47 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):

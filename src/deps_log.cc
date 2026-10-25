@@ -600,8 +600,8 @@ void DepsLog::StartEarlyStats(PendingLoad* pending,
       nodes.push_back(node);
   pending->early_stats.reset(new EarlyStats(std::move(nodes), disk_interface));
   EarlyStats* early = pending->early_stats.get();
-  // About half of the threads, to leave room for the parse.
-  size_t tasks = std::max<size_t>(1, TaskGroup::Concurrency() / 2);
+  // The tasks queue their next chunks behind other tasks.
+  size_t tasks = TaskGroup::Concurrency();
   for (size_t i = 0; i < tasks; ++i)
     early->tasks.Run([early] { early->StatSome(); });
 }
