@@ -105,6 +105,11 @@ void Rule::AddBinding(const string& key, const EvalString& val) {
   bindings_[key] = val;
 }
 
+void Rule::AddBinding(const string& key, EvalString&& val) {
+  binding_mask_ |= VariableNameSignature(key);
+  bindings_[key] = std::move(val);
+}
+
 const EvalString* Rule::GetBinding(StringPiece key) const {
   if (!(binding_mask_ & VariableNameSignature(key)))
     return NULL;

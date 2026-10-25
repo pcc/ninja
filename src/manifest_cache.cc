@@ -668,23 +668,31 @@ bool ManifestCache::Load(const std::string& path,
         envs[i]->AddBindingView(str(bindings[j].key), str(bindings[j].value));
     }
   });
-  std::vector<const Rule*> rule_ptrs;
-  for (size_t i = 0; i < rule_count; ++i) {
-    const RuleRecord& record = rules[i];
-    std::unique_ptr<Rule> rule(new Rule(str(record.name).AsString()));
-    for (uint32_t j = record.begin; j < record.end; ++j) {
-      EvalString eval;
-      for (uint32_t k = rule_bindings[j].begin; k < rule_bindings[j].end;
-           ++k) {
-        if (tokens[k].type == EvalString::RAW)
-          eval.AddText(str(tokens[k].text));
-        else
-          eval.AddSpecial(str(tokens[k].text));
+  // (CMake has two rules per target.)
+  std::vector<std::unique_ptr<Rule>> new_rules(rule_count);
+  ParallelFor(rule_count, 64, [&](size_t begin, size_t end) {
+    for (size_t i = begin; i < end; ++i) {
+      const RuleRecord& record = rules[i];
+      std::unique_ptr<Rule> rule(new Rule(str(record.name).AsString()));
+      for (uint32_t j = record.begin; j < record.end; ++j) {
+        EvalString eval;
+        for (uint32_t k = rule_bindings[j].begin; k < rule_bindings[j].end;
+             ++k) {
+          if (tokens[k].type == EvalString::RAW)
+            eval.AddText(str(tokens[k].text));
+          else
+            eval.AddSpecial(str(tokens[k].text));
+        }
+        rule->AddBinding(str(rule_bindings[j].key).AsString(),
+                         std::move(eval));
       }
-      rule->AddBinding(str(rule_bindings[j].key).AsString(), eval);
+      new_rules[i] = std::move(rule);
     }
-    rule_ptrs.push_back(rule.get());
-    envs[record.env]->AddRule(std::move(rule));
+  });
+  std::vector<const Rule*> rule_ptrs(rule_count);
+  for (size_t i = 0; i < rule_count; ++i) {
+    rule_ptrs[i] = new_rules[i].get();
+    envs[rules[i].env]->AddRule(std::move(new_rules[i]));
   }
 
   // The nodes, which may already exist if the deps log created them.

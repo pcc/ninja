@@ -99,6 +99,7 @@ struct Rule {
   const std::string& name() const { return name_; }
 
   void AddBinding(const std::string& key, const EvalString& val);
+  void AddBinding(const std::string& key, EvalString&& val);
 
   static bool IsReservedBinding(StringPiece var);
 

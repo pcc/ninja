@@ -272,6 +272,7 @@ graph):
 | (deps walk, scan bindings)     |    71 |     51 |
 | (all since, before no-shell)   |    58 |     42 |
 | simple commands without /bin/sh|    52 |     35 |
+| rules made in parallel (cache) |    46 |   32.8 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat
