@@ -168,6 +168,10 @@ struct NinjaMain : public BuildLogUser {
     LoadStatus build_log_status = LOAD_ERROR;
     std::string build_log_err;
     DepsLog::PendingLoadPtr deps_log;
+    /// Counts the steps done before nodes for the deps log can be created:
+    /// reading it, and knowing that builddir is empty.
+    std::atomic<int> deps_steps{0};
+    bool builddir_empty = false;
     TaskGroup tasks;
   };
   std::unique_ptr<SpeculativeLogs> speculative_logs_;
@@ -175,6 +179,14 @@ struct NinjaMain : public BuildLogUser {
   /// Start loading the logs on other threads.  OpenBuildLog() and
   /// OpenDepsLog() use the results if they apply.
   void StartLoadingLogs();
+
+  /// To be called by the manifest parser once the top-level variables are
+  /// known.
+  void TopLevelScopeDone();
+
+  /// Create the deps log's nodes on another thread, if the deps log has
+  /// been read and builddir is known to be empty.
+  void DepsLogStepDone();
 
   /// The type of functions that are the entry points to tools (subcommands).
   typedef int (NinjaMain::*ToolFunc)(const Options*, int, char**);
@@ -1561,7 +1573,28 @@ void NinjaMain::StartLoadingLogs() {
     logs->build_log_status = logs->build_log.Load(
         ".ninja_log", &logs->build_log_err, /*may_modify=*/false);
   });
-  logs->tasks.Run([logs] { logs->deps_log = DepsLog::Read(".ninja_deps"); });
+  logs->tasks.Run([this, logs] {
+    logs->deps_log = DepsLog::Read(".ninja_deps");
+    DepsLogStepDone();
+  });
+}
+
+void NinjaMain::TopLevelScopeDone() {
+  if (!speculative_logs_)
+    return;
+  speculative_logs_->builddir_empty =
+      state_.bindings_.LookupVariable("builddir").empty();
+  DepsLogStepDone();
+}
+
+void NinjaMain::DepsLogStepDone() {
+  SpeculativeLogs* logs = speculative_logs_.get();
+  if (logs->deps_steps.fetch_add(1, std::memory_order_acq_rel) != 1 ||
+      !logs->builddir_empty)
+    return;
+  logs->tasks.Run([this, logs] {
+    DepsLog::CreateNodes(logs->deps_log.get(), &state_);
+  });
 }
 
 bool NinjaMain::OpenBuildLog(bool recompact_only) {
@@ -2043,6 +2076,7 @@ NORETURN void real_main(int argc, char** argv) {
     if (options.phony_cycle_should_err) {
       parser_opts.phony_cycle_action_ = kPhonyCycleActionError;
     }
+    parser_opts.top_level_scope_done_ = [&ninja] { ninja.TopLevelScopeDone(); };
     ManifestParser parser(&ninja.state_, &ninja.disk_interface_, parser_opts);
     if (!options.tool || options.tool->when == Tool::RUN_AFTER_LOGS)
       ninja.StartLoadingLogs();

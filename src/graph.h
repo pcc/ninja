@@ -103,6 +103,16 @@ struct Node {
                                          uint64_t slash_bits);
   uint64_t slash_bits() const { return slash_bits_; }
 
+  /// Whether the node was created out of order (for example, while
+  /// parsing the manifest in parallel), so that its slash bits are to be
+  /// replaced by those of its first reference in the manifest.  (Nodes get
+  /// the slash bits of the first reference that creates them.)
+  bool slash_bits_provisional() const { return slash_bits_provisional_; }
+  void set_slash_bits_provisional(bool value) {
+    slash_bits_provisional_ = value;
+  }
+  void set_slash_bits(uint64_t slash_bits) { slash_bits_ = slash_bits; }
+
   TimeStamp mtime() const { return mtime_; }
 
   bool dirty() const { return dirty_; }
@@ -186,6 +196,9 @@ private:
 
   /// See has_unrecorded_out_edges().
   bool has_unrecorded_out_edges_ = false;
+
+  /// See slash_bits_provisional().
+  bool slash_bits_provisional_ = false;
 
   /// See PrefetchState.
   std::atomic<uint8_t> prefetch_state_{kPrefetchNone};

@@ -108,6 +108,9 @@ struct DepsLog {
   };
   typedef std::unique_ptr<PendingLoad, PendingLoadDeleter> PendingLoadPtr;
   static PendingLoadPtr Read(const std::string& path);
+  /// Create the nodes for the paths in \a pending, before Load().  This
+  /// may run concurrently with parsing the manifest.
+  static void CreateNodes(PendingLoad* pending, State* state);
   LoadStatus Load(PendingLoadPtr pending, const std::string& path,
                   State* state, std::string* err);
   Deps* GetDeps(Node* node);

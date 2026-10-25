@@ -34,6 +34,7 @@ typedef unsigned __int32 uint32_t;
 #include "graph.h"
 #include "metrics.h"
 #include "state.h"
+#include "thread_pool.h"
 #include "util.h"
 
 using namespace std;
@@ -238,6 +239,9 @@ struct DepsLog::PendingLoad {
     long offset;
   };
   std::vector<Record> records;
+  /// The nodes for path records (null for deps records), if CreateNodes()
+  /// ran.
+  std::vector<Node*> nodes;
   /// Whether a record failed the checks, and the end of the last record
   /// before it.
   bool read_failed = false;
@@ -329,6 +333,34 @@ DepsLog::PendingLoadPtr DepsLog::Read(const string& path) {
   return pending;
 }
 
+namespace {
+StringPiece PathOfRecord(const char* buf, unsigned size) {
+  int path_size = size - 4;
+  // There can be up to 3 bytes of padding.
+  if (buf[path_size - 1] == '\0') --path_size;
+  if (buf[path_size - 1] == '\0') --path_size;
+  if (buf[path_size - 1] == '\0') --path_size;
+  return StringPiece(buf, path_size);
+}
+}  // namespace
+
+void DepsLog::CreateNodes(PendingLoad* pending, State* state) {
+  const std::vector<PendingLoad::Record>& records = pending->records;
+  pending->nodes.resize(records.size());
+  ParallelFor(records.size(), 1024, [&](size_t begin, size_t end) {
+    for (size_t i = begin; i < end; ++i) {
+      if (records[i].is_deps)
+        continue;
+      // The manifest may be parsed concurrently, so the nodes are created out
+      // of order (and the manifest gets to set their slash bits).  See
+      // Load() for the slash bits of the other ones.
+      pending->nodes[i] = state->paths_.GetOrCreate(
+          PathOfRecord(records[i].data, records[i].size), 0,
+          /*provisional=*/true);
+    }
+  });
+}
+
 LoadStatus DepsLog::Load(const string& path, State* state, string* err) {
   return Load(Read(path), path, state, err);
 }
@@ -363,7 +395,8 @@ LoadStatus DepsLog::Load(PendingLoadPtr pending, const string& path,
   long offset = pending->valid_size;
   int unique_dep_record_count = 0;
   int total_dep_record_count = 0;
-  for (const PendingLoad::Record& record : pending->records) {
+  for (size_t i = 0; i < pending->records.size(); ++i) {
+    const PendingLoad::Record& record = pending->records[i];
     const char* buf = record.data;
     unsigned size = record.size;
     if (record.is_deps) {
@@ -380,18 +413,20 @@ LoadStatus DepsLog::Load(PendingLoadPtr pending, const string& path,
       if (!UpdateDeps(out_id, deps))
         ++unique_dep_record_count;
     } else {
-      int path_size = size - 4;
-      // There can be up to 3 bytes of padding.
-      if (buf[path_size - 1] == '\0') --path_size;
-      if (buf[path_size - 1] == '\0') --path_size;
-      if (buf[path_size - 1] == '\0') --path_size;
-      StringPiece subpath(buf, path_size);
       // It is not necessary to pass in a correct slash_bits here. It will
       // either be a Node that's in the manifest (in which case it will already
       // have a correct slash_bits that GetNode will look up), or it is an
       // implicit dependency from a .d which does not affect the build command
       // (and so need not have its slashes maintained).
-      Node* node = state->GetNode(subpath, 0);
+      Node* node;
+      if (pending->nodes.empty()) {
+        node = state->GetNode(PathOfRecord(buf, size), 0);
+      } else {
+        // If the manifest didn't refer to the node, its slash bits are the
+        // ones it would have gotten from GetNode() now.
+        node = pending->nodes[i];
+        node->set_slash_bits_provisional(false);
+      }
 
       // A path can only appear once (this also happens if two ninja
       // processes write to the same deps log concurrently).

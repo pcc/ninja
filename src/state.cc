@@ -92,20 +92,53 @@ Edge* State::AddEdge(const Rule* rule) {
   return edge;
 }
 
-Node* State::GetNode(StringPiece path, uint64_t slash_bits) {
-  Node* node = LookupNode(path);
-  if (node)
-    return node;
-  node = new Node(path.AsString(), slash_bits);
-  paths_[node->path()] = node;
+uint64_t PathMap::Hash(StringPiece path) {
+  return rapidhash(path.str_, path.len_);
+}
+
+Node* PathMap::Lookup(StringPiece path) const {
+  Key key = { path, Hash(path) };
+  const Shard& shard = ShardFor(key.hash);
+  std::lock_guard<std::mutex> lock(shard.mutex);
+  auto i = shard.map.find(key);
+  return i != shard.map.end() ? i->second : NULL;
+}
+
+Node* PathMap::GetOrCreate(StringPiece path, uint64_t hash,
+                           uint64_t slash_bits, bool provisional) {
+  Key key = { path, hash };
+  Shard& shard = ShardFor(key.hash);
+  std::lock_guard<std::mutex> lock(shard.mutex);
+  auto i = shard.map.find(key);
+  if (i != shard.map.end())
+    return i->second;
+  Node* node = new Node(path.AsString(), slash_bits);
+  node->set_slash_bits_provisional(provisional);
+  key.path = node->path();
+  shard.map.emplace(key, node);
   return node;
 }
 
+size_t PathMap::size() const {
+  size_t size = 0;
+  for (const Shard& shard : shards_)
+    size += shard.map.size();
+  return size;
+}
+
+size_t PathMap::bucket_count() const {
+  size_t count = 0;
+  for (const Shard& shard : shards_)
+    count += shard.map.bucket_count();
+  return count;
+}
+
+Node* State::GetNode(StringPiece path, uint64_t slash_bits) {
+  return paths_.GetOrCreate(path, slash_bits);
+}
+
 Node* State::LookupNode(StringPiece path) const {
-  Paths::const_iterator i = paths_.find(path);
-  if (i != paths_.end())
-    return i->second;
-  return NULL;
+  return paths_.Lookup(path);
 }
 
 Node* State::SpellcheckNode(const string& path) {
@@ -114,19 +147,33 @@ Node* State::SpellcheckNode(const string& path) {
 
   int min_distance = kMaxValidEditDistance + 1;
   Node* result = NULL;
-  for (Paths::iterator i = paths_.begin(); i != paths_.end(); ++i) {
+  paths_.ForEach([&](Node* node) {
     int distance = EditDistance(
-        i->first, path, kAllowReplacements, kMaxValidEditDistance);
-    if (distance < min_distance && i->second) {
+        node->path(), path, kAllowReplacements, kMaxValidEditDistance);
+    if (distance < min_distance) {
       min_distance = distance;
-      result = i->second;
+      result = node;
     }
-  }
+  });
   return result;
 }
 
+namespace {
+/// Fix up the slash bits of a node created out of order.
+void UseSlashBits(Node* node, uint64_t slash_bits) {
+  if (node->slash_bits_provisional()) {
+    node->set_slash_bits(slash_bits);
+    node->set_slash_bits_provisional(false);
+  }
+}
+}  // namespace
+
 void State::AddIn(Edge* edge, StringPiece path, uint64_t slash_bits) {
-  Node* node = GetNode(path, slash_bits);
+  AddIn(edge, GetNode(path, slash_bits), slash_bits);
+}
+
+void State::AddIn(Edge* edge, Node* node, uint64_t slash_bits) {
+  UseSlashBits(node, slash_bits);
   node->set_generated_by_dep_loader(false);
   edge->inputs_.push_back(node);
   node->AddOutEdge(edge);
@@ -134,15 +181,20 @@ void State::AddIn(Edge* edge, StringPiece path, uint64_t slash_bits) {
 
 bool State::AddOut(Edge* edge, StringPiece path, uint64_t slash_bits,
                    std::string* err) {
-  Node* node = GetNode(path, slash_bits);
+  return AddOut(edge, GetNode(path, slash_bits), slash_bits, err);
+}
+
+bool State::AddOut(Edge* edge, Node* node, uint64_t slash_bits,
+                   std::string* err) {
   if (Edge* other = node->in_edge()) {
     if (other == edge) {
-      *err = path.AsString() + " is defined as an output multiple times";
+      *err = node->path() + " is defined as an output multiple times";
     } else {
-      *err = "multiple rules generate " + path.AsString();
+      *err = "multiple rules generate " + node->path();
     }
     return false;
   }
+  UseSlashBits(node, slash_bits);
   edge->outputs_.push_back(node);
   node->set_in_edge(edge);
   node->set_generated_by_dep_loader(false);
@@ -150,7 +202,11 @@ bool State::AddOut(Edge* edge, StringPiece path, uint64_t slash_bits,
 }
 
 void State::AddValidation(Edge* edge, StringPiece path, uint64_t slash_bits) {
-  Node* node = GetNode(path, slash_bits);
+  AddValidation(edge, GetNode(path, slash_bits), slash_bits);
+}
+
+void State::AddValidation(Edge* edge, Node* node, uint64_t slash_bits) {
+  UseSlashBits(node, slash_bits);
   edge->validations_.push_back(node);
   node->AddValidationOutEdge(edge);
   node->set_generated_by_dep_loader(false);
@@ -189,8 +245,7 @@ vector<Node*> State::DefaultNodes(string* err) const {
 }
 
 void State::Reset() {
-  for (Paths::iterator i = paths_.begin(); i != paths_.end(); ++i)
-    i->second->ResetState();
+  paths_.ForEach([](Node* node) { node->ResetState(); });
   for (vector<Edge*>::iterator e = edges_.begin(); e != edges_.end(); ++e) {
     (*e)->outputs_ready_ = false;
     (*e)->deps_loaded_ = false;
@@ -202,14 +257,13 @@ void State::Reset() {
 }
 
 void State::Dump() {
-  for (Paths::iterator i = paths_.begin(); i != paths_.end(); ++i) {
-    Node* node = i->second;
+  paths_.ForEach([](Node* node) {
     printf("%s %s [id:%d]\n",
            node->path().c_str(),
            node->status_known() ? (node->dirty() ? "dirty" : "clean")
                                 : "unknown",
            node->id());
-  }
+  });
   if (!pools_.empty()) {
     printf("resource_pools:\n");
     for (map<string, Pool*>::const_iterator it = pools_.begin();

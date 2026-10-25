@@ -90,6 +90,13 @@ Machines used:
   StartLoadingLogs), assuming the default location (no builddir) and
   without side effects; `DepsLog::Read()` is the State-independent half
   of `DepsLog::Load()`. Anything unusual falls back to a normal load.
+- `State::paths_` is a `PathMap`: sharded (64 shards, mutex each) so nodes
+  can be created concurrently. Parse tasks create the nodes for their paths
+  (with a per-file cache in front), and the deps log creates its nodes while
+  the manifest is parsed (after the top-level scope is done, which tells
+  that builddir is empty). Nodes created out of order are "provisional":
+  their first manifest reference in merge order sets their slash bits, and
+  `default` treats them as nonexistent.
 - Leaf nodes loaded as deps don't get out-edges (flagged instead; dyndep
   recovers them if such a node gains an in-edge).
 
@@ -115,6 +122,7 @@ don't compare exactly.
 | deps log: ids stay in the file |   291 |    209 |
 | summarize leaf deps in prefetch|   215 |    139 |
 | load logs while parsing        |   180 |    127 |
+| concurrent node creation       |   175 |    113 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

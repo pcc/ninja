@@ -131,13 +131,11 @@ void VerifyGraph(const State& state) {
 
   // The union of all in- and out-edges of each nodes should be exactly edges_.
   set<const Edge*> node_edge_set;
-  for (State::Paths::const_iterator p = state.paths_.begin();
-       p != state.paths_.end(); ++p) {
-    const Node* n = p->second;
+  state.paths_.ForEach([&](const Node* n) {
     if (n->in_edge())
       node_edge_set.insert(n->in_edge());
     node_edge_set.insert(n->out_edges().begin(), n->out_edges().end());
-  }
+  });
   set<const Edge*> edge_set(state.edges_.begin(), state.edges_.end());
   EXPECT_EQ(node_edge_set, edge_set);
 }

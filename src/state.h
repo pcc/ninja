@@ -16,6 +16,7 @@
 #define NINJA_STATE_H_
 
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -91,6 +92,60 @@ struct Pool {
   DelayedEdges delayed_;
 };
 
+/// The mapping of paths to nodes.  Lookups and insertions may happen
+/// concurrently: the map is sharded by hash, with a lock per shard.
+struct PathMap {
+  /// Return the node for \a path, or null.
+  Node* Lookup(StringPiece path) const;
+
+  /// Return the node for \a path, creating it with \a slash_bits if there
+  /// is none.  See Node::slash_bits_provisional() for \a provisional.
+  Node* GetOrCreate(StringPiece path, uint64_t slash_bits,
+                    bool provisional = false) {
+    return GetOrCreate(path, Hash(path), slash_bits, provisional);
+  }
+  /// Like the above, with the Hash() of \a path.
+  Node* GetOrCreate(StringPiece path, uint64_t hash, uint64_t slash_bits,
+                    bool provisional);
+
+  static uint64_t Hash(StringPiece path);
+
+  size_t size() const;
+  size_t bucket_count() const;
+
+  /// Call \a f for all nodes, in an unspecified order (but not
+  /// concurrently with insertions).
+  template <typename F>
+  void ForEach(F f) const {
+    for (const Shard& shard : shards_)
+      for (const auto& entry : shard.map)
+        f(entry.second);
+  }
+
+ private:
+  struct Key {
+    StringPiece path;
+    uint64_t hash;
+    bool operator==(const Key& other) const { return path == other.path; }
+  };
+  struct KeyHash {
+    size_t operator()(const Key& key) const { return key.hash; }
+  };
+  static const int kShardBits = 6;
+  struct alignas(64) Shard {
+    mutable std::mutex mutex;
+    emhash8::HashMap<Key, Node*, KeyHash> map;
+  };
+  const Shard& ShardFor(uint64_t hash) const {
+    return shards_[hash >> (64 - kShardBits)];
+  }
+  Shard& ShardFor(uint64_t hash) {
+    return shards_[hash >> (64 - kShardBits)];
+  }
+
+  Shard shards_[1 << kShardBits];
+};
+
 /// Global state (file status) for a single run.
 struct State {
   static Pool kDefaultPool;
@@ -113,6 +168,11 @@ struct State {
   void AddIn(Edge* edge, StringPiece path, uint64_t slash_bits);
   bool AddOut(Edge* edge, StringPiece path, uint64_t slash_bits, std::string* err);
   void AddValidation(Edge* edge, StringPiece path, uint64_t slash_bits);
+
+  /// Like the above, for a node (for \a path) that was already looked up.
+  void AddIn(Edge* edge, Node* node, uint64_t slash_bits);
+  bool AddOut(Edge* edge, Node* node, uint64_t slash_bits, std::string* err);
+  void AddValidation(Edge* edge, Node* node, uint64_t slash_bits);
   bool AddDefault(StringPiece path, std::string* error);
 
   /// Reset state.  Keeps all nodes and edges, but restores them to the
@@ -128,8 +188,7 @@ struct State {
   std::vector<Node*> DefaultNodes(std::string* error) const;
 
   /// Mapping of path -> Node.
-  typedef ExternalStringHashMap<Node*>::Type Paths;
-  Paths paths_;
+  PathMap paths_;
 
   /// All the pools used in the graph.
   std::map<std::string, Pool*> pools_;

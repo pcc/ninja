@@ -27,6 +27,7 @@
 #include "char_scan.h"
 #include "disk_interface.h"
 #include "graph.h"
+#include "hash_map.h"
 #include "metrics.h"
 #include "state.h"
 #include "thread_pool.h"
@@ -636,6 +637,8 @@ struct PathRef {
   const char* str;
   size_t len;
   uint64_t slash_bits;
+  /// The node for the path (created if needed), unless it's empty.
+  Node* node;
 
   StringPiece piece() const { return StringPiece(str, len); }
 };
@@ -760,6 +763,7 @@ ptrdiff_t LastDefinition(const std::string& input) {
 
 /// State shared by the tasks processing the files of one manifest.
 struct ParseContext {
+  State* state;
   FileReader* file_reader;
   /// Whether to process subninjas on other threads.
   bool parallel;
@@ -819,8 +823,9 @@ struct FileProcessor {
     lexer_.newline_escapes_.clear();
   }
 
-  /// Evaluate and canonicalize a path into the arena.
-  PathRef EvaluatePath(const RawString& raw, Env* env) {
+  /// Evaluate and canonicalize a path into the arena, and look up its node
+  /// (if \a with_node).
+  PathRef EvaluatePath(const RawString& raw, Env* env, bool with_node) {
     PathRef path;
     if (raw.literal) {
       path.len = raw.end - raw.begin;
@@ -835,13 +840,42 @@ struct FileProcessor {
       memcpy(str, scratch_.data(), path.len);
       path.str = str;
     }
-    if (path.len)
+    path.slash_bits = 0;
+    path.node = nullptr;
+    if (path.len) {
       CanonicalizePath(const_cast<char*>(path.str), &path.len,
                        &path.slash_bits);
-    else
-      path.slash_bits = 0;
+      if (with_node)
+        path.node = GetNode(path);
+    }
     return path;
   }
+
+  /// Return the node for \a path, creating it if needed.  Paths tend to
+  /// repeat within files, so look in a cache before the State.
+  Node* GetNode(const PathRef& path) {
+    StringPiece piece = path.piece();
+    uint64_t hash = PathMap::Hash(piece);
+    auto i = node_cache_.find(CacheKey{ piece, hash });
+    if (i != node_cache_.end())
+      return i->second;
+    // Nodes are created in a different order than they would be by a
+    // serial parse, which matters for their slash bits.
+    Node* node = ctx_->state->paths_.GetOrCreate(piece, hash, path.slash_bits,
+                                                 /*provisional=*/true);
+    node_cache_.emplace(CacheKey{ piece, hash }, node);
+    return node;
+  }
+  struct CacheKey {
+    StringPiece path;
+    uint64_t hash;
+    bool operator==(const CacheKey& other) const { return path == other.path; }
+  };
+  struct CacheKeyHash {
+    size_t operator()(const CacheKey& key) const { return key.hash; }
+  };
+  /// Keys point into the file's arena.
+  emhash8::HashMap<CacheKey, Node*, CacheKeyHash> node_cache_;
 
   /// Whether no definitions follow \a pos in this file (and the parent
   /// scopes are frozen), so that a subninja at \a pos can be processed
@@ -1067,7 +1101,8 @@ bool FileProcessor::ParseDefault(std::string* err) {
     pending.paths.clear();
   };
   do {
-    PathRef path = EvaluatePath(raw, env_);
+    // Defaults only look up nodes.
+    PathRef path = EvaluatePath(raw, env_, /*with_node=*/false);
     pending.paths.emplace_back(path, lexer_.last_token_);
     // An empty path is an error, reported when merging.
     if (path.len == 0) {
@@ -1274,11 +1309,11 @@ bool FileProcessor::ParseEdge(std::string* err) {
   edge.order_only_ins = order_only;
   edge.validations = static_cast<int>(validations_.size());
   for (const RawString& raw : outs_)
-    file_->paths.push_back(EvaluatePath(raw, env));
+    file_->paths.push_back(EvaluatePath(raw, env, true));
   for (const RawString& raw : ins_)
-    file_->paths.push_back(EvaluatePath(raw, env));
+    file_->paths.push_back(EvaluatePath(raw, env, true));
   for (const RawString& raw : validations_)
-    file_->paths.push_back(EvaluatePath(raw, env));
+    file_->paths.push_back(EvaluatePath(raw, env, true));
 
   // The dyndep binding is evaluated after the edge got its inputs and
   // outputs; if it refers to them, evaluate it when merging.
@@ -1383,9 +1418,15 @@ bool ManifestParser::Merger::Merge(ParsedFile* file, std::string* err) {
       for (const auto& path : file->defaults[item.index].paths) {
         if (path.first.len == 0)
           return Error(file, path.second, "empty path", err);
-        std::string default_err;
-        if (!state_->AddDefault(path.first.piece(), &default_err))
-          return Error(file, path.second, default_err, err);
+        // Nodes that are only provisional have not been referenced yet in a
+        // serial parse.
+        Node* node = state_->LookupNode(path.first.piece());
+        if (!node || node->slash_bits_provisional())
+          return Error(file, path.second,
+                       "unknown target '" + path.first.piece().AsString() +
+                           "'",
+                       err);
+        state_->defaults_.push_back(node);
       }
       break;
     case Item::kFile: {
@@ -1445,7 +1486,7 @@ bool ManifestParser::Merger::MergeEdge(ParsedFile* file,
   for (int i = 0; i < pending.outs; ++i, ++path) {
     if (path->len == 0)
       return Error(file, pending.error_pos, "empty path", err);
-    if (!state_->AddOut(edge, path->piece(), path->slash_bits, err))
+    if (!state_->AddOut(edge, path->node, path->slash_bits, err))
       return Error(file, pending.error_pos, std::string(*err), err);
   }
 
@@ -1462,7 +1503,7 @@ bool ManifestParser::Merger::MergeEdge(ParsedFile* file,
   for (int i = 0; i < pending.ins; ++i, ++path) {
     if (path->len == 0)
       return Error(file, pending.error_pos, "empty path", err);
-    state_->AddIn(edge, path->piece(), path->slash_bits);
+    state_->AddIn(edge, path->node, path->slash_bits);
   }
   edge->implicit_deps_ = pending.implicit_ins;
   edge->order_only_deps_ = pending.order_only_ins;
@@ -1471,7 +1512,7 @@ bool ManifestParser::Merger::MergeEdge(ParsedFile* file,
   for (int i = 0; i < pending.validations; ++i, ++path) {
     if (path->len == 0)
       return Error(file, pending.error_pos, "empty path", err);
-    state_->AddValidation(edge, path->piece(), path->slash_bits);
+    state_->AddValidation(edge, path->node, path->slash_bits);
   }
 
   if (parser_->options_.phony_cycle_action_ == kPhonyCycleActionWarn &&
@@ -1535,6 +1576,7 @@ std::string ManifestParser::LookupVariable(const std::string& varname) {
 bool ManifestParser::Parse(const string& filename, const string& input,
                            string* err) {
   ParseContext ctx;
+  ctx.state = state_;
   ctx.file_reader = file_reader_;
   ctx.parallel = file_reader_ && file_reader_->IsReadFileThreadSafe() &&
                  TaskGroup::Concurrency() > 1;
@@ -1543,6 +1585,8 @@ bool ManifestParser::Parse(const string& filename, const string& input,
   root.filename = filename;
   root.input = input;
   ProcessFile(&ctx, &root, env_, true);
+  if (options_.top_level_scope_done_)
+    options_.top_level_scope_done_();
 
   Merger merger(this);
   bool ok = merger.Merge(&root, err);
