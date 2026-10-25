@@ -655,8 +655,10 @@ struct PendingEdge {
   std::string dyndep;
   uint64_t dyndep_slash_bits = 0;
   bool dyndep_deferred = false;
-  /// Indexes into ParsedFile::paths_.
+  /// Indexes into ParsedFile::paths_.  The paths are only kept if the merge
+  /// needs them: if one of them is empty, or has slash bits.
   size_t paths_begin;
+  static const size_t kNoPaths = static_cast<size_t>(-1);
   int outs, implicit_outs, ins, implicit_ins, order_only_ins, validations;
   /// Where errors found when adding the edge are reported.
   const char* error_pos;
@@ -967,6 +969,7 @@ struct FileProcessor {
   bool frozen_;
   Lex lexer_;
   std::vector<RawString> outs_, ins_, validations_;
+  std::vector<PathRef> paths_;
   std::string scratch_;
 };
 
@@ -1453,28 +1456,37 @@ bool FileProcessor::ParseEdge(std::string* err) {
     edge.pool_deferred = pool_env.cycle_;
   }
 
-  edge.paths_begin = file_->paths.size();
   edge.outs = static_cast<int>(outs_.size());
   edge.implicit_outs = implicit_outs;
   edge.ins = static_cast<int>(ins_.size());
   edge.implicit_ins = implicit;
   edge.order_only_ins = order_only;
   edge.validations = static_cast<int>(validations_.size());
+  std::vector<PathRef>& paths = paths_;
+  paths.clear();
   for (const RawString& raw : outs_)
-    file_->paths.push_back(EvaluatePath(raw, env, true));
+    paths.push_back(EvaluatePath(raw, env, true));
   for (const RawString& raw : ins_)
-    file_->paths.push_back(EvaluatePath(raw, env, true));
+    paths.push_back(EvaluatePath(raw, env, true));
   for (const RawString& raw : validations_)
-    file_->paths.push_back(EvaluatePath(raw, env, true));
+    paths.push_back(EvaluatePath(raw, env, true));
+  bool empty_path = false;
+  bool slash_bits = false;
+  for (const PathRef& path : paths) {
+    empty_path |= !path.node;
+    slash_bits |= path.slash_bits != 0;
+  }
+  edge.paths_begin = PendingEdge::kNoPaths;
+  if (empty_path || slash_bits) {
+    edge.paths_begin = file_->paths.size();
+    file_->paths.insert(file_->paths.end(), paths.begin(), paths.end());
+  }
 
   // Build the edge, unless a path is empty: then there will be an error
   // when adding it.
-  bool empty_path = false;
-  for (size_t i = edge.paths_begin; i < file_->paths.size(); ++i)
-    empty_path |= !file_->paths[i].node;
   if (!empty_path) {
     Edge* e = State::CreateEdge(rule, env);
-    const PathRef* path = &file_->paths[edge.paths_begin];
+    const PathRef* path = paths.data();
     e->outputs_.reserve(edge.outs);
     for (int i = 0; i < edge.outs; ++i)
       e->outputs_.push_back(path++->node);
@@ -1672,20 +1684,24 @@ bool ManifestParser::Merger::MergeEdge(ParsedFile* file,
     edge->pool_ = pool;
   }
 
-  const PathRef* path = &file->paths[pending.paths_begin];
   if (pending.edge) {
     // The edge has its nodes already: connect them.
+    const PathRef* path = pending.paths_begin == PendingEdge::kNoPaths
+                              ? nullptr
+                              : &file->paths[pending.paths_begin];
+    auto slash_bits = [&path]() { return path ? path++->slash_bits : 0; };
     for (Node* node : edge->outputs_) {
-      if (!state_->ConnectOutput(edge, node, path++->slash_bits, err))
+      if (!state_->ConnectOutput(edge, node, slash_bits(), err))
         return Error(file, pending.error_pos, std::string(*err), err);
     }
     for (Node* node : edge->inputs_)
-      state_->ConnectInput(edge, node, path++->slash_bits);
+      state_->ConnectInput(edge, node, slash_bits());
     for (Node* node : edge->validations_)
-      state_->ConnectValidation(edge, node, path++->slash_bits);
+      state_->ConnectValidation(edge, node, slash_bits());
     return FinishEdge(file, pending, edge, err);
   }
 
+  const PathRef* path = &file->paths[pending.paths_begin];
   edge->outputs_.reserve(pending.outs);
   for (int i = 0; i < pending.outs; ++i, ++path) {
     if (path->len == 0)
