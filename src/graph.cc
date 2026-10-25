@@ -88,6 +88,13 @@ class RecomputeOutputsDirtyCache {
     /// Stable pointer identity is required for correct caching behavior.
     bool LookupByOutput(const BuildLog* buildLog, const Node* output);
     const BuildLog::LogEntry* operator->() const { return entry_; }
+    /// Set the result of the lookup, found earlier.
+    void SetEntry(BuildLog::LogEntry* entry, const Node* output) {
+      evaluated_ = true;
+      entry_ = entry;
+      assert((checkOutput_ = output, true));
+      (void)output;
+    }
 
    private:
     bool evaluated_ = false;
@@ -102,7 +109,13 @@ class RecomputeOutputsDirtyCache {
   RecomputeOutputsDirtyCache(BuildLog* build_log,
                              OptionalExplanations& explanations, Edge* edge)
       : buildLog_(build_log), explanations_(explanations), edge_(edge),
-        logEntry_(edge->outputs_.size()) {}
+        logEntry_(edge->outputs_.size()) {
+    if (BuildLog::LogEntry* entry =
+            edge->scan_bindings_.valid
+                ? edge->scan_bindings_.first_output_log_entry
+                : nullptr)
+      logEntry_[0].SetEntry(entry, edge->outputs_[0]);
+  }
 
   /// Determines whether at least one output of edge 'edge_' is considered dirty.
   ///
@@ -493,7 +506,10 @@ void DependencyScan::Prefetch(Node* initial_node) {
 
       if (build_log_ && !b.generator && !edge->is_phony()) {
         for (Node* output : edge->outputs_) {
-          if (build_log_->LookupByOutput(output->path())) {
+          if (BuildLog::LogEntry* entry =
+                  build_log_->LookupByOutput(output->path())) {
+            if (output == edge->outputs_[0])
+              b.first_output_log_entry = entry;
             b.command_hash = BuildLog::LogEntry::HashCommand(
                 edge->EvaluateCommand(/*incl_rsp_file=*/true));
             b.command_hash_valid = true;

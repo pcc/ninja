@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "build_log.h"
 #include "deps_log.h"
 #include "dyndep.h"
 #include "eval_env.h"
@@ -341,6 +342,9 @@ struct Edge {
     /// The hash of EvaluateCommand(true), if command_hash_valid.
     bool command_hash_valid = false;
     uint64_t command_hash = 0;
+    /// The build log's entry for the first output, if it has one.  (Entries
+    /// are updated in place, and never removed during builds.)
+    BuildLog::LogEntry* first_output_log_entry = nullptr;
   };
   ScanBindings scan_bindings_;
 
