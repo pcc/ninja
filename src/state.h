@@ -158,6 +158,10 @@ struct State {
 
   Edge* AddEdge(const Rule* rule);
 
+  /// Create an edge (on any thread) to be added with AppendEdge() later.
+  static Edge* CreateEdge(const Rule* rule, BindingEnv* env);
+  void AppendEdge(Edge* edge);
+
   Node* GetNode(StringPiece path, uint64_t slash_bits);
   Node* LookupNode(StringPiece path) const;
   Node* SpellcheckNode(const std::string& path);
@@ -173,6 +177,13 @@ struct State {
   void AddIn(Edge* edge, Node* node, uint64_t slash_bits);
   bool AddOut(Edge* edge, Node* node, uint64_t slash_bits, std::string* err);
   void AddValidation(Edge* edge, Node* node, uint64_t slash_bits);
+
+  /// Like the above, for nodes that are already in the edge's inputs,
+  /// outputs or validations.
+  void ConnectInput(Edge* edge, Node* node, uint64_t slash_bits);
+  bool ConnectOutput(Edge* edge, Node* node, uint64_t slash_bits,
+                     std::string* err);
+  void ConnectValidation(Edge* edge, Node* node, uint64_t slash_bits);
   bool AddDefault(StringPiece path, std::string* error);
 
   /// Reset state.  Keeps all nodes and edges, but restores them to the

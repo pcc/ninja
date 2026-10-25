@@ -110,6 +110,10 @@ void TaskGroup::Wait() {
       [this] { return pending_.load(std::memory_order_acquire) == 0; });
 }
 
+void RunDetached(std::function<void()> task) {
+  ThreadPool::Get().Push(std::move(task));
+}
+
 void RunTasksUntil(const std::function<bool()>& done) {
   ThreadPool::Get().RunUntil(done);
 }

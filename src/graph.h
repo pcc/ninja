@@ -44,8 +44,8 @@ struct State;
 /// Information about a node in the dependency graph: the file, whether
 /// it's dirty, mtime, etc.
 struct Node {
-  Node(const std::string& path, uint64_t slash_bits)
-      : path_(path), slash_bits_(slash_bits) {}
+  Node(StringPiece path, uint64_t slash_bits)
+      : path_(path.str_, path.len_), slash_bits_(slash_bits) {}
 
   /// Return false on error.
   bool Stat(DiskInterface* disk_interface, std::string* err);

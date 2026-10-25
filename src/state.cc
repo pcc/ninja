@@ -17,6 +17,8 @@
 #include <assert.h>
 #include <stdio.h>
 
+#include <cstddef>
+
 #include "edit_distance.h"
 #include "graph.h"
 #include "util.h"
@@ -61,6 +63,30 @@ void Pool::Dump() const {
   }
 }
 
+namespace {
+
+/// Allocate memory for an object that is never freed: nodes and edges live
+/// as long as the process.  Allocating them in blocks per thread is faster.
+void* AllocateForever(size_t size) {
+  const size_t kBlockSize = 1 << 20;
+  thread_local char* next = nullptr;
+  thread_local size_t left = 0;
+  size = (size + alignof(std::max_align_t) - 1) &
+         ~(alignof(std::max_align_t) - 1);
+  if (size > left) {
+    if (size > kBlockSize / 8)
+      return ::operator new(size);
+    next = static_cast<char*>(::operator new(kBlockSize));
+    left = kBlockSize;
+  }
+  void* result = next;
+  next += size;
+  left -= size;
+  return result;
+}
+
+}  // namespace
+
 Pool State::kDefaultPool("", 0);
 Pool State::kConsolePool("console", 1);
 
@@ -83,13 +109,24 @@ Pool* State::LookupPool(const string& pool_name) {
 }
 
 Edge* State::AddEdge(const Rule* rule) {
-  Edge* edge = new Edge();
+  Edge* edge = CreateEdge(rule, &bindings_);
+  AppendEdge(edge);
+  return edge;
+}
+
+// static
+Edge* State::CreateEdge(const Rule* rule, BindingEnv* env) {
+  // Edges are never deleted.
+  Edge* edge = new (AllocateForever(sizeof(Edge))) Edge();
   edge->rule_ = rule;
   edge->pool_ = &State::kDefaultPool;
-  edge->env_ = &bindings_;
+  edge->env_ = env;
+  return edge;
+}
+
+void State::AppendEdge(Edge* edge) {
   edge->id_ = edges_.size();
   edges_.push_back(edge);
-  return edge;
 }
 
 uint64_t PathMap::Hash(StringPiece path) {
@@ -112,7 +149,8 @@ Node* PathMap::GetOrCreate(StringPiece path, uint64_t hash,
   auto i = shard.map.find(key);
   if (i != shard.map.end())
     return i->second;
-  Node* node = new Node(path.AsString(), slash_bits);
+  // Nodes are never deleted.
+  Node* node = new (AllocateForever(sizeof(Node))) Node(path, slash_bits);
   node->set_slash_bits_provisional(provisional);
   key.path = node->path();
   shard.map.emplace(key, node);
@@ -173,9 +211,13 @@ void State::AddIn(Edge* edge, StringPiece path, uint64_t slash_bits) {
 }
 
 void State::AddIn(Edge* edge, Node* node, uint64_t slash_bits) {
+  edge->inputs_.push_back(node);
+  ConnectInput(edge, node, slash_bits);
+}
+
+void State::ConnectInput(Edge* edge, Node* node, uint64_t slash_bits) {
   UseSlashBits(node, slash_bits);
   node->set_generated_by_dep_loader(false);
-  edge->inputs_.push_back(node);
   node->AddOutEdge(edge);
 }
 
@@ -186,6 +228,14 @@ bool State::AddOut(Edge* edge, StringPiece path, uint64_t slash_bits,
 
 bool State::AddOut(Edge* edge, Node* node, uint64_t slash_bits,
                    std::string* err) {
+  if (!ConnectOutput(edge, node, slash_bits, err))
+    return false;
+  edge->outputs_.push_back(node);
+  return true;
+}
+
+bool State::ConnectOutput(Edge* edge, Node* node, uint64_t slash_bits,
+                          std::string* err) {
   if (Edge* other = node->in_edge()) {
     if (other == edge) {
       *err = node->path() + " is defined as an output multiple times";
@@ -195,7 +245,6 @@ bool State::AddOut(Edge* edge, Node* node, uint64_t slash_bits,
     return false;
   }
   UseSlashBits(node, slash_bits);
-  edge->outputs_.push_back(node);
   node->set_in_edge(edge);
   node->set_generated_by_dep_loader(false);
   return true;
@@ -206,8 +255,12 @@ void State::AddValidation(Edge* edge, StringPiece path, uint64_t slash_bits) {
 }
 
 void State::AddValidation(Edge* edge, Node* node, uint64_t slash_bits) {
-  UseSlashBits(node, slash_bits);
   edge->validations_.push_back(node);
+  ConnectValidation(edge, node, slash_bits);
+}
+
+void State::ConnectValidation(Edge* edge, Node* node, uint64_t slash_bits) {
+  UseSlashBits(node, slash_bits);
   node->AddValidationOutEdge(edge);
   node->set_generated_by_dep_loader(false);
 }

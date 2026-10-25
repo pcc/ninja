@@ -97,6 +97,10 @@ Machines used:
   that builddir is empty). Nodes created out of order are "provisional":
   their first manifest reference in merge order sets their slash bits, and
   `default` treats them as nonexistent.
+- Nodes and edges are never freed, and are allocated from per-thread
+  blocks (state.cc AllocateForever). Parse tasks build complete Edge objects;
+  the merge appends them (ids) and connects their nodes. The parsed files'
+  temporary data is freed on a background thread (RunDetached).
 - Leaf nodes loaded as deps don't get out-edges (flagged instead; dyndep
   recovers them if such a node gains an in-edge).
 
@@ -136,6 +140,7 @@ don't compare exactly.
 | lazy previous elapsed times    |   175 |     89 |
 | ReadFile without copies        |   177 |        |
 | fast path for canonical paths  |   164 |        |
+| edges built in parse tasks     |   159 |     85 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

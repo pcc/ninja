@@ -660,6 +660,9 @@ struct PendingEdge {
   int outs, implicit_outs, ins, implicit_ins, order_only_ins, validations;
   /// Where errors found when adding the edge are reported.
   const char* error_pos;
+  /// The edge, with its inputs, outputs and validations, unless one of the
+  /// paths is empty (an error when adding the edge).
+  Edge* edge = nullptr;
 };
 
 struct ParsedFile;
@@ -1315,6 +1318,29 @@ bool FileProcessor::ParseEdge(std::string* err) {
   for (const RawString& raw : validations_)
     file_->paths.push_back(EvaluatePath(raw, env, true));
 
+  // Build the edge, unless a path is empty: then there will be an error
+  // when adding it.
+  bool empty_path = false;
+  for (size_t i = edge.paths_begin; i < file_->paths.size(); ++i)
+    empty_path |= !file_->paths[i].node;
+  if (!empty_path) {
+    Edge* e = State::CreateEdge(rule, env);
+    const PathRef* path = &file_->paths[edge.paths_begin];
+    e->outputs_.reserve(edge.outs);
+    for (int i = 0; i < edge.outs; ++i)
+      e->outputs_.push_back(path++->node);
+    e->implicit_outs_ = edge.implicit_outs;
+    e->inputs_.reserve(edge.ins);
+    for (int i = 0; i < edge.ins; ++i)
+      e->inputs_.push_back(path++->node);
+    e->implicit_deps_ = edge.implicit_ins;
+    e->order_only_deps_ = edge.order_only_ins;
+    e->validations_.reserve(edge.validations);
+    for (int i = 0; i < edge.validations; ++i)
+      e->validations_.push_back(path++->node);
+    edge.edge = e;
+  }
+
   // The dyndep binding is evaluated after the edge got its inputs and
   // outputs; if it refers to them, evaluate it when merging.
   {
@@ -1374,6 +1400,9 @@ struct ManifestParser::Merger {
  private:
   bool MergeEdge(ParsedFile* file, const PendingEdge& pending,
                  std::string* err);
+  /// The part of MergeEdge() after the nodes of the edge are connected.
+  bool FinishEdge(ParsedFile* file, const PendingEdge& pending, Edge* edge,
+                  std::string* err);
 
   bool Error(ParsedFile* file, const char* pos, const std::string& message,
              std::string* err) {
@@ -1468,11 +1497,24 @@ bool ManifestParser::Merger::Merge(ParsedFile* file, std::string* err) {
 bool ManifestParser::Merger::MergeEdge(ParsedFile* file,
                                        const PendingEdge& pending,
                                        std::string* err) {
-  Edge* edge = state_->AddEdge(pending.rule);
-  edge->env_ = pending.env;
+  Edge* edge = pending.edge;
+  if (edge) {
+    state_->AppendEdge(edge);
+  } else {
+    edge = state_->AddEdge(pending.rule);
+    edge->env_ = pending.env;
+  }
 
-  std::string pool_name =
-      pending.pool_deferred ? edge->GetBinding("pool") : pending.pool;
+  // The pool is looked up before the edge has inputs and outputs.
+  std::string pool_name;
+  if (pending.pool_deferred) {
+    Edge pool_edge;
+    pool_edge.rule_ = pending.rule;
+    pool_edge.env_ = pending.env;
+    pool_name = pool_edge.GetBinding("pool");
+  } else {
+    pool_name = pending.pool;
+  }
   if (!pool_name.empty()) {
     Pool* pool = state_->LookupPool(pool_name);
     if (pool == NULL)
@@ -1482,6 +1524,19 @@ bool ManifestParser::Merger::MergeEdge(ParsedFile* file,
   }
 
   const PathRef* path = &file->paths[pending.paths_begin];
+  if (pending.edge) {
+    // The edge has its nodes already: connect them.
+    for (Node* node : edge->outputs_) {
+      if (!state_->ConnectOutput(edge, node, path++->slash_bits, err))
+        return Error(file, pending.error_pos, std::string(*err), err);
+    }
+    for (Node* node : edge->inputs_)
+      state_->ConnectInput(edge, node, path++->slash_bits);
+    for (Node* node : edge->validations_)
+      state_->ConnectValidation(edge, node, path++->slash_bits);
+    return FinishEdge(file, pending, edge, err);
+  }
+
   edge->outputs_.reserve(pending.outs);
   for (int i = 0; i < pending.outs; ++i, ++path) {
     if (path->len == 0)
@@ -1493,8 +1548,8 @@ bool ManifestParser::Merger::MergeEdge(ParsedFile* file,
   if (edge->outputs_.empty()) {
     // All outputs of the edge are already created by other edges. Don't add
     // this edge.  Do this check before input nodes are connected to the edge.
+    // (Edges are never deleted.)
     state_->edges_.pop_back();
-    delete edge;
     return true;
   }
   edge->implicit_outs_ = pending.implicit_outs;
@@ -1514,7 +1569,12 @@ bool ManifestParser::Merger::MergeEdge(ParsedFile* file,
       return Error(file, pending.error_pos, "empty path", err);
     state_->AddValidation(edge, path->node, path->slash_bits);
   }
+  return FinishEdge(file, pending, edge, err);
+}
 
+bool ManifestParser::Merger::FinishEdge(ParsedFile* file,
+                                        const PendingEdge& pending,
+                                        Edge* edge, std::string* err) {
   if (parser_->options_.phony_cycle_action_ == kPhonyCycleActionWarn &&
       edge->maybe_phonycycle_diagnostic()) {
     // CMake 2.8.12.x and 3.0.x incorrectly write phony build statements
@@ -1581,16 +1641,21 @@ bool ManifestParser::Parse(const string& filename, const string& input,
   ctx.parallel = file_reader_ && file_reader_->IsReadFileThreadSafe() &&
                  TaskGroup::Concurrency() > 1;
 
-  ParsedFile root;
-  root.filename = filename;
-  root.input = input;
-  ProcessFile(&ctx, &root, env_, true);
+  std::unique_ptr<ParsedFile> root(new ParsedFile);
+  root->filename = filename;
+  root->input = input;
+  ProcessFile(&ctx, root.get(), env_, true);
   if (options_.top_level_scope_done_)
     options_.top_level_scope_done_();
 
   Merger merger(this);
-  bool ok = merger.Merge(&root, err);
+  bool ok = merger.Merge(root.get(), err);
   // On errors, there may still be files being processed.
   ctx.tasks.Wait();
+  // Freeing all that takes a while.
+  if (ctx.parallel) {
+    ParsedFile* files = root.release();
+    RunDetached([files] { delete files; });
+  }
   return ok;
 }

@@ -46,6 +46,10 @@ struct TaskGroup {
   std::atomic<size_t> pending_{0};
 };
 
+/// Queue \a task to run on some thread at some point, without waiting for
+/// it (for example, to free memory).
+void RunDetached(std::function<void()> task);
+
 /// Run queued tasks on the calling thread until \a done returns true.
 /// Whatever makes \a done return true must call NotifyTaskWaiters()
 /// afterwards.
