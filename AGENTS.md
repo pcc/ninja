@@ -29,7 +29,8 @@ Constraints:
 ## Benchmark
 
 Tools live in `misc/bench/`:
-- `gen_bench.py` – deterministic generator of a GN/Chromium-shaped tree:
+- `gen_bench.py` – deterministic generator of a GN/Chromium-shaped tree
+  (out/Default; also the same build CMake-style in out/CMake):
   ~2000 targets, ~42k compile steps, one subninja per target, ~39 MB of
   manifests, ~300 headers per source (13M deps entries, ~60 MB
   `.ninja_deps`), a GN-style generator rule with `build.ninja.d`.
@@ -73,7 +74,10 @@ Machines used:
   there): files are lexed by a reimplementation of `lexer.in.cc` (which
   remains for dyndep files) and their effects on the State are recorded as
   items, merged in order on one thread. Subninjas are processed on other
-  threads when no definitions follow them in the parent scopes. Error
+  threads when no definitions follow them in the parent scopes, and the
+  rest of a big file (>256 KB) after its last definition is split into
+  ~128 KB chunks at "build" lines (after an unescaped newline) that are
+  processed on other threads. Error
   messages and positions are the same as before; the per-include-depth
   `ninja_required_version` state for `$^` is emulated.
 - `DependencyScan::Prefetch()` (graph.cc): parallel stat + binding
@@ -157,6 +161,15 @@ don't compare exactly.
 | faster $in lists (SIMD escape) |   161 |     81 |
 | stat deps-log nodes while parsing |   118 |     74 |
 | load deps log while parsing    |   118 |     71 |
+
+CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
+graph):
+
+| Change                         | arm64 | x86-64 |
+|--------------------------------|------:|-------:|
+| baseline (upstream ninja)      |   817 |    757 |
+| (all of the above)             |   315 |    284 |
+| process big files in chunks    |   225 |    185 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

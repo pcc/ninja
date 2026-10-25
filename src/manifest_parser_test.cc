@@ -1366,3 +1366,77 @@ TEST(ParallelManifestParserTest, MatchesSerialParse) {
 
   temp_dir.Cleanup();
 }
+
+// Large files are processed in chunks on other threads when they can be:
+// check that this gives the same results as a serial parse.
+TEST(ParallelManifestParserTest, MatchesSerialParseInChunks) {
+  ScopedTempDir temp_dir;
+  temp_dir.CreateAndEnter("ParallelManifestParserTest");
+
+  std::string head =
+      "rule cc\n"
+      "  command = cc $flags $in -o $out\n"
+      "flags = -O2\n";
+  std::string body;
+  for (int i = 0; i < 25000; ++i) {
+    std::string n = std::to_string(i);
+    body += "build obj/" + n + ".o: cc src/" + n + ".c || obj/stamp\n";
+    if (i % 7 == 0)
+      body += "  flags = -g" + n + "\n";
+    if (i % 101 == 0)
+      body += "# A comment ending with an escape that isn't one $\n";
+    // A continuation line that looks like the start of a statement.
+    if (i % 997 == 0)
+      body += "build obj/" + n + ".x: cc $\nbuild\n";
+    if (i == 1500)
+      body += "subninja sub.ninja\n";
+  }
+  body += "build obj/stamp: cc stamp.in\n"
+          "build all: phony obj/0.o obj/24999.o\n"
+          "default all\n";
+  WriteTestFile("sub.ninja", "build sub.o: cc sub.c\n  flags = $flags -sub\n");
+
+  const char* kVariants[][2] = {
+    { "", "" },
+    // An error near the end, after errors that would be found in chunks
+    // processed earlier... and one near the start.
+    { "build obj/5000.o: cc dup\n", "" },
+    { "", "build obj/5000.o: cc dup\n" },
+    // A definition near the end: the file can't be processed in chunks
+    // before it.
+    { "", "flags = -O3\n" },
+    // A syntax error in the middle.
+    { "build $bad\n", "" },
+  };
+  for (const auto& variant : kVariants) {
+    std::string middle = variant[0];
+    size_t half = body.find("\nbuild ", body.size() / 2) + 1;
+    std::string manifest = head + body.substr(0, half) + middle +
+                           body.substr(half) + variant[1];
+    ASSERT_GT(manifest.size(), 1u << 20);
+    WriteTestFile("build.ninja", manifest);
+
+    std::string results[2];
+    for (int parallel = 0; parallel < 2; ++parallel) {
+      State state;
+      RealDiskInterface real_disk;
+      SerialDiskInterface serial_disk;
+      ManifestParser parser(&state, parallel ? static_cast<FileReader*>(
+                                                   &real_disk)
+                                             : &serial_disk);
+      std::string err;
+      bool ok = parser.Load("build.ninja", &err);
+      results[parallel] = (ok ? "ok\n" : "error: " + err + "\n");
+      if (ok)
+        results[parallel] += DescribeState(state);
+    }
+    EXPECT_EQ(results[0], results[1]) << "variant: " << variant[0] << " "
+                                      << variant[1];
+    bool expect_ok = !*variant[0] && (!*variant[1] || variant[1][0] == 'f');
+    EXPECT_EQ(expect_ok ? "ok\n" : "error: ",
+              results[0].substr(0, expect_ok ? 3 : 7))
+        << results[0].substr(0, 200);
+  }
+
+  temp_dir.Cleanup();
+}

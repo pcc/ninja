@@ -708,6 +708,14 @@ struct ParsedFile {
   std::string filename;
   /// The contents of the file, NUL-terminated and padded.
   std::string input;
+  /// The text of the file: input.data(), or the text of the file that this
+  /// is a chunk of.
+  const char* text = nullptr;
+  /// The size of the text (without padding).
+  size_t size = 0;
+  /// For chunks: the part of the text to process.
+  const char* chunk_begin = nullptr;
+  const char* chunk_end = nullptr;
   /// The depth of nesting of includes and subninjas.  The original parser
   /// used a Lexer per depth, and the state of a Lexer that matters for
   /// $^ escapes persisted across files.
@@ -726,6 +734,8 @@ struct ParsedFile {
   /// Set once the file has been processed (by some thread).
   std::atomic<bool> done{false};
 
+
+
   /// The offset of the start of the last line in the file that may start a
   /// definition (see the overview), or -1 if not computed yet.
   ptrdiff_t last_definition = -1;
@@ -736,32 +746,74 @@ struct ParsedFile {
   }
 };
 
-/// Return the offset of the start of the last line of \a input that may
-/// start a definition: a line that starts with something that is not
-/// "build", "pool", "default" or "subninja" followed by a non-identifier
-/// character, and does not start with ' ', '#', '\r' or '\n'.  This is
-/// conservative: lines that continue a previous line are also considered.
-ptrdiff_t LastDefinition(const std::string& input) {
-  const char* begin = input.data();
-  // The size without padding.
-  const char* p = begin + strlen(begin);
-  while (p > begin) {
-    // Find the start of the line containing p - 1.
-    const char* line = p - 1;
-    while (line > begin && line[-1] != '\n')
-      --line;
-    if (IsVarnameChar(*line)) {
-      const char* e = line;
-      while (IsVarnameChar(*e))
-        ++e;
-      StringPiece word(line, e - line);
-      if (word != "build" && word != "pool" && word != "default" &&
-          word != "subninja")
-        return line - begin;
-    }
-    p = line;
+/// Return whether the line starting at \a line may start a definition: if
+/// it starts with something that is not "build", "pool", "default" or
+/// "subninja" followed by a non-identifier character, and does not start
+/// with ' ', '#', '\r' or '\n'.  This is conservative: lines that continue
+/// a previous line are also considered.
+bool MayStartDefinition(const char* line) {
+  if (!IsVarnameChar(*line))
+    return false;
+  const char* e = line;
+  while (IsVarnameChar(*e))
+    ++e;
+  StringPiece word(line, e - line);
+  return word != "build" && word != "pool" && word != "default" &&
+         word != "subninja";
+}
+
+/// Return the offset in \a text of the start of the last line that may
+/// start a definition among the lines starting in [begin, end), or -1.
+ptrdiff_t LastDefinitionIn(const char* text, const char* begin,
+                           const char* end) {
+  ptrdiff_t last = -1;
+  const char* line = begin;
+  if (line != text && line[-1] != '\n') {
+    line = static_cast<const char*>(memchr(line, '\n', end - line));
+    if (!line)
+      return -1;
+    ++line;
   }
-  return -1;
+  while (line < end) {
+    if (MayStartDefinition(line))
+      last = line - text;
+    line = static_cast<const char*>(memchr(line, '\n', end - line));
+    if (!line)
+      break;
+    ++line;
+  }
+  return last;
+}
+
+/// Return the offset of the start of the last line of the file that may
+/// start a definition (see MayStartDefinition()), or -1.
+ptrdiff_t LastDefinition(const char* text, size_t size, bool parallel) {
+  const size_t kSegment = 1 << 20;
+  if (!parallel || size < 2 * kSegment)
+    return LastDefinitionIn(text, text, text + size);
+  size_t segments = (size + kSegment - 1) / kSegment;
+  std::vector<ptrdiff_t> last(segments);
+  ParallelFor(segments, 1, [&](size_t begin, size_t end) {
+    for (size_t i = begin; i < end; ++i)
+      last[i] = LastDefinitionIn(text, text + i * kSegment,
+                                 text + std::min(size, (i + 1) * kSegment));
+  });
+  return *std::max_element(last.begin(), last.end());
+}
+
+/// Return whether the newline at \a newline (in \a text) is escaped (as
+/// far as one can tell from the text before it: in comments, '$' does not
+/// escape newlines).
+bool MayBeEscapedNewline(const char* text, const char* newline) {
+  const char* p = newline;
+  if (p > text && p[-1] == '\r')
+    --p;
+  int dollars = 0;
+  while (p > text && p[-1] == '$') {
+    --p;
+    ++dollars;
+  }
+  return dollars % 2 == 1;
 }
 
 /// State shared by the tasks processing the files of one manifest.
@@ -790,7 +842,7 @@ bool LoadAndProcessFile(ParseContext* ctx, ParsedFile* parent,
   if (ctx->file_reader->ReadFile(file->filename, &file->input, &read_err) !=
       FileReader::Okay) {
     // Errors loading the file are reported in the context of the parent.
-    file->AddError(FormatError(parent->filename, parent->input.data(), pos,
+    file->AddError(FormatError(parent->filename, parent->text, pos,
                                "loading '" + file->filename + "': " +
                                    read_err));
     file->done.store(true, std::memory_order_release);
@@ -886,10 +938,17 @@ struct FileProcessor {
   bool FrozenAt(const char* pos) {
     if (!frozen_)
       return false;
-    if (file_->last_definition == -1)
-      file_->last_definition = LastDefinition(file_->input) + 1;
-    return pos - file_->input.data() >= file_->last_definition;
+    if (file_->last_definition == -1) {
+      file_->last_definition =
+          LastDefinition(file_->text, file_->size, ctx_->parallel) + 1;
+    }
+    return pos - file_->text >= file_->last_definition;
   }
+
+  /// If what remains of the file after \a pos is large, and only has
+  /// statements that don't change the scope, process it in chunks on
+  /// other threads.  Returns whether it did.
+  bool ProcessRestInChunks(const char* pos);
 
   ParseContext* ctx_;
   ParsedFile* file_;
@@ -902,8 +961,12 @@ struct FileProcessor {
 
 bool ProcessFile(ParseContext* ctx, ParsedFile* file, BindingEnv* env,
                  bool frozen) {
-  // Pad the input for the lexer.
-  file->input.append(kCharScanPadding + 1, '\0');
+  if (!file->text) {
+    // Pad the input for the lexer.
+    file->size = file->input.size();
+    file->input.append(kCharScanPadding + 1, '\0');
+    file->text = file->input.data();
+  }
   FileProcessor processor(ctx, file, env, frozen);
   bool ok = processor.Run();
   file->done.store(true, std::memory_order_release);
@@ -911,11 +974,23 @@ bool ProcessFile(ParseContext* ctx, ParsedFile* file, BindingEnv* env,
 }
 
 bool FileProcessor::Run() {
-  lexer_.Start(file_->filename, file_->input.data());
+  lexer_.Start(file_->filename, file_->text);
+  if (file_->chunk_begin)
+    lexer_.ofs_ = file_->chunk_begin;
+  // Whether this processor may split the rest of its file into chunks.
+  bool may_chunk = ctx_->parallel && !file_->chunk_begin;
   std::string err;
   bool ok = true;
   while (ok) {
+    if (may_chunk && ProcessRestInChunks(lexer_.ofs_))
+      return true;
     Lex::Token token = lexer_.ReadToken();
+    // Chunks end at the start of a statement.
+    if (file_->chunk_end && lexer_.last_token_ >= file_->chunk_end &&
+        token != Lex::TEOF) {
+      lexer_.UnreadToken();
+      return true;
+    }
     switch (token) {
     case Lex::POOL:
       ok = ParsePool(&err);
@@ -971,6 +1046,61 @@ bool FileProcessor::Run() {
   if (!err.empty())
     file_->AddError(err);
   return false;
+}
+
+bool FileProcessor::ProcessRestInChunks(const char* pos) {
+  const size_t kMinSize = 256 << 10;
+  const size_t kChunkSize = 128 << 10;
+  const char* end = file_->text + file_->size;
+  if (end - pos < static_cast<ptrdiff_t>(kMinSize) || !FrozenAt(pos))
+    return false;
+  // The first chunk is the rest of the current line, plus some.  Chunks
+  // start at "build" statements (the start of a line, after an unescaped
+  // newline): there, a serial parse is at the start of a statement too.
+  std::vector<const char*> starts(1, pos);
+  for (const char* target = pos + kChunkSize; target < end;
+       target += kChunkSize) {
+    const char* line = target;
+    while (line < end) {
+      const char* newline =
+          static_cast<const char*>(memchr(line, '\n', end - line));
+      if (!newline)
+        break;
+      line = newline + 1;
+      if (memcmp(line, "build ", 6) == 0 &&
+          !MayBeEscapedNewline(file_->text, newline))
+        break;
+    }
+    if (line >= end)
+      break;
+    if (line > starts.back())
+      starts.push_back(line);
+    target = line;
+  }
+  if (starts.size() < 2)
+    return false;
+
+  for (size_t i = 0; i < starts.size(); ++i) {
+    std::unique_ptr<ParsedFile> owned_chunk(new ParsedFile);
+    ParsedFile* chunk = owned_chunk.get();
+    chunk->filename = file_->filename;
+    chunk->text = file_->text;
+    chunk->size = file_->size;
+    chunk->depth = file_->depth;
+    chunk->chunk_begin = starts[i];
+    chunk->chunk_end = i + 1 < starts.size() ? starts[i + 1] : nullptr;
+    // All of it is after the last definition.
+    chunk->last_definition = 0;
+    file_->items.push_back({ Item::kFile, 0, std::move(owned_chunk) });
+    ParseContext* ctx = ctx_;
+    BindingEnv* env = env_;
+    bool frozen = frozen_;
+    ctx_->tasks.Run([ctx, chunk, env, frozen] {
+      ProcessFile(ctx, chunk, env, frozen);
+      NotifyTaskWaiters();
+    });
+  }
+  return true;
 }
 
 bool FileProcessor::ParsePool(std::string* err) {
@@ -1406,7 +1536,7 @@ struct ManifestParser::Merger {
 
   bool Error(ParsedFile* file, const char* pos, const std::string& message,
              std::string* err) {
-    *err = FormatError(file->filename, file->input.data(), pos, message);
+    *err = FormatError(file->filename, file->text, pos, message);
     return false;
   }
 
