@@ -616,8 +616,11 @@ void DepsLog::WaitForEarlyStats() {
 }
 
 void DepsLog::ForgetEarlyStats() {
-  if (early_stats_)
+  if (early_stats_) {
     early_stats_->forgotten = true;
+    early_stats_->cancel.store(true, std::memory_order_relaxed);
+    early_stats_->tasks.Wait();
+  }
 }
 
 LoadStatus DepsLog::Load(const string& path, State* state, string* err) {

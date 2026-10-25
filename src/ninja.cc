@@ -369,6 +369,7 @@ bool NinjaMain::RebuildManifest(const char* input_file, string* err,
 
   // Commands may change files that were stat()ed already.
   deps_log_.ForgetEarlyStats();
+  disk_interface_.UseDirectoryHandles(false);
   if (builder.Build(err) != ExitSuccess)
     return false;
 
@@ -1556,6 +1557,9 @@ bool WarningEnable(const string& name, Options* options) {
 }
 
 void NinjaMain::StartLoadingLogs() {
+  // Until commands run (that could replace directories), the many stat()s of
+  // loading and scanning can be relative to directory handles.
+  disk_interface_.UseDirectoryHandles(true);
   speculative_logs_.reset(new SpeculativeLogs);
   SpeculativeLogs* logs = speculative_logs_.get();
   logs->tasks.Run([logs] {
@@ -1854,7 +1858,9 @@ ExitStatus NinjaMain::RunBuild(int argc, char** argv, Status* status) {
   }
 
   // Make sure restat rules do not see stale timestamps.
+  deps_log_.ForgetEarlyStats();
   disk_interface_.AllowStatCache(false);
+  disk_interface_.UseDirectoryHandles(false);
 
   if (builder.AlreadyUpToDate()) {
     if (config_.verbosity != BuildConfig::NO_STATUS_UPDATE) {
@@ -2101,8 +2107,11 @@ NORETURN void real_main(int argc, char** argv) {
     if (!ninja.OpenBuildLog() || !ninja.OpenDepsLog())
       exit(1);
 
-    if (options.tool && options.tool->when == Tool::RUN_AFTER_LOGS)
+    if (options.tool && options.tool->when == Tool::RUN_AFTER_LOGS) {
+      ninja.deps_log_.ForgetEarlyStats();
+      ninja.disk_interface_.UseDirectoryHandles(false);
       exit((ninja.*options.tool->func)(&options, argc, argv));
+    }
 
     // Attempt to rebuild the manifest before building anything else
     if (ninja.RebuildManifest(options.input_file, &err, status)) {
@@ -2150,20 +2159,28 @@ int main(int argc, char** argv) {
   mallopt(M_TOP_PAD, 64 << 20);
 #endif
 #ifndef _WIN32
-  // Grow the file descriptor table to the soft limit (up to some size)
+  // Grow the file descriptor table (up to some size, and to the hard limit
+  // on open files, raising the soft one meanwhile: see UseDirectoryHandles())
   // now, while there is a single thread: when the table is shared by
   // several threads, Linux waits for an RCU grace period each time it grows
   // it, which can take tens of milliseconds.
   struct rlimit limit;
   if (getrlimit(RLIMIT_NOFILE, &limit) == 0) {
-    const rlim_t kMaxSize = 4096;
-    int top = static_cast<int>(std::min<rlim_t>(limit.rlim_cur, kMaxSize)) - 1;
+    const rlim_t kMaxSize = 8192;
+    struct rlimit raised = limit;
+    raised.rlim_cur = std::min<rlim_t>(limit.rlim_max, kMaxSize);
+    bool raise = raised.rlim_cur > limit.rlim_cur &&
+                 setrlimit(RLIMIT_NOFILE, &raised) == 0;
+    int top = static_cast<int>(std::min<rlim_t>(
+                  raise ? raised.rlim_cur : limit.rlim_cur, kMaxSize)) - 1;
     int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
     if (fd >= 0) {
       if (top > fd && dup2(fd, top) == top)
         close(top);
       close(fd);
     }
+    if (raise)
+      setrlimit(RLIMIT_NOFILE, &limit);
   }
 #endif
 #if defined(_MSC_VER)

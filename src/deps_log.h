@@ -138,7 +138,9 @@ struct DepsLog {
   /// stat() it as usual).  Must be called at most once per id.
   TimeStamp TakeEarlyStat(int id);
 
-  /// Don't use early stat() results anymore (if files may have changed).
+  /// Don't use early stat() results anymore (if files may have changed),
+  /// and stop the early stat()s (waiting for those in progress): the disk
+  /// interface may stop being usable from several threads.
   void ForgetEarlyStats();
 
   /// Wait for the early stat()s to be done.  Used for tests.

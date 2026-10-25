@@ -30,10 +30,18 @@
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <unistd.h>
+
+#include <atomic>
+#include <deque>
+#include <mutex>
+#include <unordered_map>
 #endif
 
+#include "hash_map.h"
 #include "metrics.h"
+#include "thread_pool.h"
 #include "util.h"
 
 using namespace std;
@@ -217,6 +225,118 @@ RealDiskInterface::RealDiskInterface()
 {}
 #endif
 
+#if defined(__linux__) && defined(O_PATH)
+/// Open handles of directories, by path.
+struct RealDiskInterface::DirectoryHandles {
+  /// The most handles to keep open.
+  static constexpr int kMaxHandles = 8192 - 512;
+
+  DirectoryHandles() {
+    // main() grew the file descriptor table for this, so that it doesn't
+    // have to grow while there are several threads (see there).
+    if (getrlimit(RLIMIT_NOFILE, &original_limit_) == 0) {
+      struct rlimit limit = original_limit_;
+      limit.rlim_cur = std::min<rlim_t>(limit.rlim_max, kMaxHandles + 512);
+      if (limit.rlim_cur > original_limit_.rlim_cur &&
+          setrlimit(RLIMIT_NOFILE, &limit) == 0)
+        limit_raised_ = true;
+      else
+        limit.rlim_cur = original_limit_.rlim_cur;
+      budget_ = std::min<int>(kMaxHandles, static_cast<int>(
+          std::max<rlim_t>(limit.rlim_cur, 512) - 512));
+    }
+  }
+
+  /// Close the handles, and restore the limit on open files.  Closing them
+  /// takes a while, so it happens on another thread.
+  static void Release(std::unique_ptr<DirectoryHandles> handles) {
+    if (handles->limit_raised_)
+      setrlimit(RLIMIT_NOFILE, &handles->original_limit_);
+    DirectoryHandles* released = handles.release();
+    RunDetached([released] { delete released; });
+  }
+
+  ~DirectoryHandles() {
+    for (Shard& shard : shards_) {
+      for (const auto& entry : shard.handles) {
+        if (entry.second >= 0)
+          close(entry.second);
+      }
+    }
+  }
+
+  /// Return a handle of the directory \a dir, or -1.
+  int Get(StringPiece dir) {
+    Shard& shard = shards_[rapidhash(dir.str_, dir.len_) % kShards];
+    {
+      std::lock_guard<SpinLock> lock(shard.lock);
+      auto i = shard.handles.find(dir);
+      if (i != shard.handles.end())
+        return i->second;
+    }
+    int fd = -1;
+    if (opened_.fetch_add(1, std::memory_order_relaxed) < budget_)
+      fd = open(dir.AsString().c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC);
+    // Failures are remembered too: then stat() as usual.
+    std::lock_guard<SpinLock> lock(shard.lock);
+    auto i = shard.handles.find(dir);
+    if (i != shard.handles.end()) {
+      if (fd >= 0)
+        close(fd);
+      return i->second;
+    }
+    shard.names.emplace_back(dir.AsString());
+    shard.handles.emplace(shard.names.back(), fd);
+    return fd;
+  }
+
+ private:
+  struct SpinLock {
+    void lock() {
+      while (locked_.exchange(true, std::memory_order_acquire)) {
+        while (locked_.load(std::memory_order_relaxed)) {
+        }
+      }
+    }
+    void unlock() { locked_.store(false, std::memory_order_release); }
+    std::atomic<bool> locked_{false};
+  };
+  static constexpr size_t kShards = 64;
+  struct alignas(64) Shard {
+    SpinLock lock;
+    /// The handles, by path (in names).
+    std::unordered_map<StringPiece, int> handles;
+    std::deque<std::string> names;
+  };
+  Shard shards_[kShards];
+  std::atomic<int> opened_{0};
+  int budget_ = 0;
+  struct rlimit original_limit_;
+  bool limit_raised_ = false;
+};
+#else
+struct RealDiskInterface::DirectoryHandles {
+  int Get(StringPiece) { return -1; }
+  static void Release(std::unique_ptr<DirectoryHandles>) {}
+};
+#endif
+
+RealDiskInterface::~RealDiskInterface() {
+  if (directory_handles_)
+    DirectoryHandles::Release(std::move(directory_handles_));
+}
+
+void RealDiskInterface::UseDirectoryHandles(bool use) {
+#if defined(__linux__) && defined(O_PATH)
+  if (use && !directory_handles_)
+    directory_handles_.reset(new DirectoryHandles);
+  else if (!use && directory_handles_)
+    DirectoryHandles::Release(std::move(directory_handles_));
+#else
+  (void)use;
+#endif
+}
+
 bool RealDiskInterface::IsStatThreadSafe() const {
 #ifdef _WIN32
   return !use_cache_;
@@ -269,11 +389,28 @@ TimeStamp RealDiskInterface::Stat(const string& path, string* err) const {
 #else
 #ifdef __USE_LARGEFILE64
   struct stat64 st;
-  if (stat64(path.c_str(), &st) < 0) {
+#define NINJA_FSTATAT fstatat64
+#define NINJA_STAT stat64
 #else
   struct stat st;
-  if (stat(path.c_str(), &st) < 0) {
+#define NINJA_FSTATAT fstatat
+#define NINJA_STAT stat
 #endif
+  int result = 1;
+  if (directory_handles_) {
+    // Relative to the directory's handle, there is a single name to look up.
+    size_t slash = path.rfind('/');
+    if (slash != string::npos && slash > 0 && slash + 1 < path.size()) {
+      int dir = directory_handles_->Get(StringPiece(path.data(), slash));
+      if (dir >= 0)
+        result = NINJA_FSTATAT(dir, path.c_str() + slash + 1, &st, 0);
+    }
+  }
+  if (result > 0)
+    result = NINJA_STAT(path.c_str(), &st);
+#undef NINJA_FSTATAT
+#undef NINJA_STAT
+  if (result < 0) {
     if (errno == ENOENT || errno == ENOTDIR)
       return 0;
     *err = "stat(" + path + "): " + strerror(errno);

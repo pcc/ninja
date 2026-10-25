@@ -163,6 +163,14 @@ Machines used:
   differences in the environment are bash's `_` (and SHLVL when unset).
   `SubprocessTest.CommandsWithAndWithoutShell` compares the arguments with
   the shell's.
+- Until commands run, RealDiskInterface::Stat() uses fstatat() relative
+  to handles (O_PATH) of the files' directories (UseDirectoryHandles(),
+  Linux only): one name to look up instead of the whole path saves ~28% of
+  the stat() CPU on x86-64 (the benchmark has 3000 directories; nothing
+  measurable on arm64). The soft RLIMIT_NOFILE is raised (to at most
+  8192) meanwhile and restored before commands or tools run; main() grows
+  the fd table to that size up front. The handles are closed on another
+  thread.
 - Leaf nodes loaded as deps don't get out-edges (flagged instead; dyndep
   recovers them if such a node gains an in-edge).
 
@@ -182,9 +190,7 @@ printed at those points, and phases of CPU time from `perf record -g` of
 
 Tried without gain (or worse): starting the early stats right after reading
 the deps log (they compete with the loads), urgent ParallelFor helpers,
-spinning thread-pool workers, io_uring statx (much more CPU), stat()ing
-relative to cached directory handles (x86-64: -7% CPU but at best -0.8 ms
-with 3000 handles, which needs a higher RLIMIT_NOFILE; nothing on arm64),
+spinning thread-pool workers, io_uring statx (much more CPU),
 MAP_POPULATE
 or THP for node/edge blocks, a smaller memory footprint (BindingEnv rules
 out of line, 16-byte deps-log records, depfile views), parallelizing the
@@ -256,6 +262,7 @@ don't compare exactly.
 | 256 node map shards            |    73 |   34.9 |
 | leaner serial scan loop        |    65 |   34.6 |
 | nodes made outside map locks   |    71 |   34.4 |
+| stat() via directory handles   |    71 |   33.5 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):
@@ -273,6 +280,7 @@ graph):
 | (all since, before no-shell)   |    58 |     42 |
 | simple commands without /bin/sh|    52 |     35 |
 | rules made in parallel (cache) |    46 |   32.8 |
+| stat() via directory handles   |    50 |   31.8 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

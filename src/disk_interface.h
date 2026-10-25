@@ -16,6 +16,7 @@
 #define NINJA_DISK_INTERFACE_H_
 
 #include <map>
+#include <memory>
 #include <string>
 
 #include "timestamp.h"
@@ -126,7 +127,7 @@ struct DiskInterface: public FileReader {
 /// Implementation of DiskInterface that actually hits the disk.
 struct RealDiskInterface : public DiskInterface {
   RealDiskInterface();
-  virtual ~RealDiskInterface() {}
+  virtual ~RealDiskInterface();
   TimeStamp Stat(const std::string& path, std::string* err) const override;
   bool IsStatThreadSafe() const override;
   bool IsReadFileThreadSafe() const override { return true; }
@@ -142,12 +143,23 @@ struct RealDiskInterface : public DiskInterface {
   /// Whether stat information can be cached.  Only has an effect on Windows.
   void AllowStatCache(bool allow);
 
+  /// Whether Stat() may look up files relative to handles of their
+  /// directories, which it keeps open meanwhile (raising the limit on open
+  /// files if needed, until this is turned off).  That's faster for the
+  /// many stat() calls of a build's start, but the handles would miss
+  /// directories being replaced: only while no command runs.  Only has an
+  /// effect on Linux.
+  void UseDirectoryHandles(bool use);
+
 #ifdef _WIN32
   /// Whether long paths are enabled.  Only has an effect on Windows.
   bool AreLongPathsEnabled() const;
 #endif
 
  private:
+  /// See UseDirectoryHandles().
+  struct DirectoryHandles;
+  std::unique_ptr<DirectoryHandles> directory_handles_;
 #ifdef _WIN32
   /// Whether stat information can be cached.
   bool use_cache_;
