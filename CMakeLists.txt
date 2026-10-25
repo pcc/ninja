@@ -143,6 +143,7 @@ add_library(libninja OBJECT
   src/jobserver_pool.cc
   src/json.cc
   src/line_printer.cc
+  src/manifest_cache.cc
   src/manifest_parser.cc
   src/metrics.cc
   src/missing_deps.cc
@@ -290,6 +291,7 @@ if(BUILD_TESTING)
     src/jobserver_pool_test.cc
     src/json_test.cc
     src/lexer_test.cc
+    src/manifest_cache_test.cc
     src/manifest_parser_test.cc
     src/missing_deps_test.cc
     src/ninja_test.cc

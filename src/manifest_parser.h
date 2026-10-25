@@ -57,6 +57,9 @@ struct ManifestParser : public Parser {
   /// Must be called only after a successful Load() call.
   std::string LookupVariable(const std::string& varname);
 
+  /// Whether parsing printed warnings.
+  bool had_warnings() const { return had_warnings_; }
+
  private:
   /// Parse a file, given its contents as a string.
   bool Parse(const std::string& filename, const std::string& input,
@@ -74,6 +77,7 @@ struct ManifestParser : public Parser {
   BindingEnv* env_;
   ManifestParserOptions options_;
   bool quiet_;
+  bool had_warnings_ = false;
 };
 
 #endif  // NINJA_MANIFEST_PARSER_H_

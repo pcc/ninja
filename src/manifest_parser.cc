@@ -1635,6 +1635,11 @@ bool ManifestParser::Merger::Merge(ParsedFile* file, std::string* err) {
       DepthState& depth = depth_state(file->depth);
       CheckNinjaVersion(file->strings[item.index], &depth.major,
                         &depth.minor);
+      // CheckNinjaVersion() warns about older major versions.
+      int bin_major, bin_minor;
+      ParseVersion(kNinjaVersion, &bin_major, &bin_minor);
+      if (bin_major > depth.major)
+        parser_->had_warnings_ = true;
       break;
     }
     case Item::kNewlineEscape: {
@@ -1756,6 +1761,7 @@ bool ManifestParser::Merger::FinishEdge(ParsedFile* file,
         Warning("phony target '%s' names itself as an input; "
                 "ignoring [-w phonycycle=warn]",
                 out->path().c_str());
+        parser_->had_warnings_ = true;
       }
     }
   }

@@ -359,43 +359,128 @@ FileReader::Status FileReader::LoadFile(const std::string& path,
   return Okay;
 }
 
+#ifndef _WIN32
+namespace {
+FileStatus StatusFromStat(const struct stat& st) {
+  FileStatus status;
+  status.dev = st.st_dev;
+  status.ino = st.st_ino;
+  status.size = st.st_size;
+#if defined(__APPLE__)
+  status.mtime = (int64_t)st.st_mtimespec.tv_sec * 1000000000LL +
+                 st.st_mtimespec.tv_nsec;
+  status.ctime = (int64_t)st.st_ctimespec.tv_sec * 1000000000LL +
+                 st.st_ctimespec.tv_nsec;
+#elif defined(st_mtime)  // A macro, so we're likely on modern POSIX.
+  status.mtime = (int64_t)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+  status.ctime = (int64_t)st.st_ctim.tv_sec * 1000000000LL + st.st_ctim.tv_nsec;
+#else
+  status.mtime = (int64_t)st.st_mtime * 1000000000LL;
+  status.ctime = (int64_t)st.st_ctime * 1000000000LL;
+#endif
+  return status;
+}
+}  // namespace
+#endif
+
+// static
+bool FileStatus::Get(const std::string& path, FileStatus* status) {
+#ifndef _WIN32
+  struct stat st;
+  if (stat(path.c_str(), &st) < 0)
+    return false;
+  *status = StatusFromStat(st);
+  return true;
+#else
+  return false;
+#endif
+}
+
 FileReader::Status RealDiskInterface::LoadFile(const std::string& path,
                                                size_t padding,
                                                FileContents* contents,
                                                std::string* err) {
 #ifndef _WIN32
+  contents->path = path;
+  int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    err->assign(strerror(errno));
+    return errno == ENOENT ? NotFound : OtherError;
+  }
+  struct stat st;
+  if (fstat(fd, &st) < 0) {
+    err->assign(strerror(errno));
+    close(fd);
+    return OtherError;
+  }
+  FileStatus status = StatusFromStat(st);
   // Map large files, which saves copying them.  Small ones are faster to
   // read.
   const size_t kMinMapSize = 1 << 20;
-  int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-  if (fd >= 0) {
-    struct stat st;
-    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
-        static_cast<size_t>(st.st_size) >= kMinMapSize) {
-      size_t size = st.st_size;
-      size_t page = sysconf(_SC_PAGESIZE);
-      size_t mapping_size = (size + padding + page - 1) / page * page;
-      // Reserve (zeroed) memory for the file and the padding, and map the
-      // file over the start of it.  The rest of its last page reads as zeros.
-      void* mapping = mmap(NULL, mapping_size, PROT_READ,
-                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-      if (mapping != MAP_FAILED) {
-        if (mmap(mapping, size, PROT_READ, MAP_PRIVATE | MAP_FIXED, fd, 0) !=
-            MAP_FAILED) {
-          close(fd);
-          contents->mapping = mapping;
-          contents->mapping_size = mapping_size;
-          contents->data = static_cast<const char*>(mapping);
-          contents->size = size;
-          return Okay;
-        }
+  bool loaded = false;
+  if (S_ISREG(st.st_mode) && static_cast<size_t>(st.st_size) >= kMinMapSize) {
+    size_t size = st.st_size;
+    size_t page = sysconf(_SC_PAGESIZE);
+    size_t mapping_size = (size + padding + page - 1) / page * page;
+    // Reserve (zeroed) memory for the file and the padding, and map the
+    // file over the start of it.  The rest of its last page reads as zeros.
+    void* mapping = mmap(NULL, mapping_size, PROT_READ,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mapping != MAP_FAILED) {
+      if (mmap(mapping, size, PROT_READ, MAP_PRIVATE | MAP_FIXED, fd, 0) !=
+          MAP_FAILED) {
+        contents->mapping = mapping;
+        contents->mapping_size = mapping_size;
+        contents->data = static_cast<const char*>(mapping);
+        contents->size = size;
+        loaded = true;
+      } else {
         munmap(mapping, mapping_size);
       }
     }
-    close(fd);
   }
-#endif
+  if (!loaded) {
+    // Read directly into the string, one more byte than expected to see the
+    // end of the file in one read.
+    std::string& storage = contents->storage;
+    size_t used = 0;
+    size_t capacity = st.st_size + 1;
+    storage.reserve(capacity + padding);
+    storage.resize(capacity);
+    for (;;) {
+      if (used == capacity) {
+        capacity += 64 << 10;
+        storage.resize(capacity);
+      }
+      ssize_t len = read(fd, &storage[used], capacity - used);
+      if (len < 0) {
+        if (errno == EINTR)
+          continue;
+        err->assign(strerror(errno));
+        storage.clear();
+        close(fd);
+        return OtherError;
+      }
+      if (len == 0)
+        break;
+      used += len;
+    }
+    storage.resize(used);
+    contents->size = used;
+    storage.append(padding, '\0');
+    contents->data = storage.data();
+  }
+  // The status is only useful if the file didn't change while being read.
+  if (fstat(fd, &st) == 0 && StatusFromStat(st) == status &&
+      S_ISREG(st.st_mode)) {
+    contents->has_status = true;
+    contents->status = status;
+  }
+  close(fd);
+  return Okay;
+#else
   return FileReader::LoadFile(path, padding, contents, err);
+#endif
 }
 
 FileReader::Status RealDiskInterface::ReadFile(const string& path,

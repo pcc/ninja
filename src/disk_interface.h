@@ -22,6 +22,24 @@
 
 /// Interface for reading files from disk.  See DiskInterface for details.
 /// This base offers the minimum interface needed just to read files.
+/// The identity and status of a file, to tell whether it changed.
+struct FileStatus {
+  uint64_t dev = 0;
+  uint64_t ino = 0;
+  uint64_t size = 0;
+  int64_t mtime = 0;
+  int64_t ctime = 0;
+
+  bool operator==(const FileStatus& other) const {
+    return dev == other.dev && ino == other.ino && size == other.size &&
+           mtime == other.mtime && ctime == other.ctime;
+  }
+  bool operator!=(const FileStatus& other) const { return !(*this == other); }
+
+  /// Get the status of \a path.  Returns false if that's not possible.
+  static bool Get(const std::string& path, FileStatus* status);
+};
+
 /// The contents of a file loaded by FileReader::LoadFile().
 struct FileContents {
   FileContents() = default;
@@ -37,6 +55,12 @@ struct FileContents {
   std::string storage;
   void* mapping = nullptr;
   size_t mapping_size = 0;
+
+  /// The path of the file, and its status as of when it was read, if known
+  /// (and it did not change while being read).
+  std::string path;
+  bool has_status = false;
+  FileStatus status;
 };
 
 struct FileReader {

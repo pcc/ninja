@@ -121,6 +121,17 @@ Machines used:
   vector (indexed once there are more than 16); the parser adds literal
   values as views into the manifest text, which `State::manifest_contents_`
   keeps alive. Rules have a hash index (CMake has two rules per target).
+- Manifest cache (`src/manifest_cache.*`, `.ninja_manifest_cache` next to
+  the logs, only without builddir and not for tools): after a parse without
+  warnings, the graph (nodes, scopes, rules, pools, edges, defaults) is
+  saved with the status (dev, ino, size, mtime, ctime) of every manifest
+  file; it's used while they all have the same status. Files changed less
+  than 2 s before saving make it skip saving (timestamp granularity).
+  Records are fixed-size arrays used in place (checked in parallel first),
+  strings are deduplicated (the CMake cache is 22 MB, not 120). Loading
+  takes ~25 ms of wall time on arm64 (node creation dominates); saving
+  costs ~50 ms on a cache miss. `ManifestCacheTest.External` compares a
+  cache-loaded graph with a parsed one for any manifest (see the test).
 - Leaf nodes loaded as deps don't get out-edges (flagged instead; dyndep
   recovers them if such a node gains an in-edge).
 
@@ -174,6 +185,7 @@ don't compare exactly.
 | canonical paths not copied     |   111 |     69 |
 | (small cleanups: log entries, name masks, command buffer) |   111 |     67 |
 | spin locks for the node map    |   107 |     62 |
+| manifest cache                 |   107 |     58 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):
@@ -186,6 +198,7 @@ graph):
 | map big manifests, no copies   |   108 |     82 |
 | bindings as views, flat envs   |   101 |     73 |
 | (small cleanups since)         |    76 |     69 |
+| manifest cache                 |    75 |     55 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

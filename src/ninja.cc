@@ -58,6 +58,7 @@
 #include "jobserver.h"
 #include "jobserver_pool.h"
 #include "json.h"
+#include "manifest_cache.h"
 #include "manifest_parser.h"
 #include "metrics.h"
 #include "missing_deps.h"
@@ -2073,9 +2074,22 @@ NORETURN void real_main(int argc, char** argv) {
     if (!options.tool || options.tool->when == Tool::RUN_AFTER_LOGS)
       ninja.StartLoadingLogs();
     string err;
-    if (!parser.Load(options.input_file, &err)) {
-      status->Error("%s", err.c_str());
-      exit(1);
+    // Builds use the cache of the manifest, if it's up to date, and update
+    // it otherwise.
+    const char kManifestCachePath[] = ".ninja_manifest_cache";
+    bool use_cache = !options.tool;
+    if (!use_cache || !ManifestCache::Load(kManifestCachePath,
+                                           options.input_file, parser_opts,
+                                           &ninja.state_)) {
+      if (!parser.Load(options.input_file, &err)) {
+        status->Error("%s", err.c_str());
+        exit(1);
+      }
+      // The cache is only kept next to the logs at their default location.
+      if (use_cache && !config.dry_run && !parser.had_warnings() &&
+          ninja.state_.bindings_.LookupVariable("builddir").empty())
+        ManifestCache::Save(kManifestCachePath, options.input_file,
+                            parser_opts, ninja.state_, &err);
     }
 
     if (options.tool && options.tool->when == Tool::RUN_AFTER_LOAD)
@@ -2108,7 +2122,7 @@ NORETURN void real_main(int argc, char** argv) {
     // any other value is ignored (thus 0 does not disable the flag if it is
     // used).
     std::string enable_jobserver_pool =
-        parser.LookupVariable("enable_jobserver_pool");
+        ninja.state_.bindings_.LookupVariable("enable_jobserver_pool");
     if (enable_jobserver_pool == "1") {
       const_cast<BuildConfig&>(ninja.config_).jobserver_pool = true;
     }
