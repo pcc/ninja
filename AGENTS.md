@@ -196,7 +196,9 @@ or THP for node/edge blocks, a smaller memory footprint (BindingEnv rules
 out of line, 16-byte deps-log records, depfile views), parallelizing the
 deps log's id assignment, and a parallel bottom-up dirty scan (synchronizing
 the ~480k edge-to-edge dependencies, mostly order-only, costs more than the
-serial scan).
+serial scan), and letting the prefetch's edges pass continue on other
+threads while the serial scan starts (claiming the edges it needs: it
+then does much of that work itself, in its order; +1 ms).
 
 ## Pitfalls found so far
 
