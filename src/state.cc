@@ -145,15 +145,24 @@ Node* PathMap::GetOrCreate(StringPiece path, uint64_t hash,
                            uint64_t slash_bits, bool provisional) {
   Key key = { path, hash };
   Shard& shard = ShardFor(key.hash);
-  std::lock_guard<SpinLock> lock(shard.mutex);
-  auto i = shard.map.find(key);
-  if (i != shard.map.end())
-    return i->second;
+  {
+    std::lock_guard<SpinLock> lock(shard.mutex);
+    auto i = shard.map.find(key);
+    if (i != shard.map.end())
+      return i->second;
+  }
+  // Make the node without holding the lock (that allocates memory, which
+  // may take a while), then add it unless another thread did meanwhile.
   // Nodes are never deleted.
   Node* node = new (AllocateForever(sizeof(Node))) Node(path, slash_bits);
   node->set_slash_bits_provisional(provisional);
   key.path = node->path();
-  shard.map.emplace(key, node);
+  std::lock_guard<SpinLock> lock(shard.mutex);
+  auto inserted = shard.map.emplace(key, node);
+  if (!inserted.second) {
+    node->~Node();
+    return inserted.first->second;
+  }
   return node;
 }
 
