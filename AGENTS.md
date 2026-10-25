@@ -220,13 +220,18 @@ the locks it saves).
 
 ## Results
 
-Median time to first command (ms), tree on tmpfs. Run-to-run noise is
-large (medians move by ±5 ms on arm64, ±0.5 ms on x86-64), so compare
-builds with interleaved runs (A B A B ...) rather than back-to-back
-batches. The arm64 column comes from one interleaved run of all the
-commits' binaries (40-130 runs each); the x86-64 one from comparisons
-against the previous commit, made over several sessions, so its rows
-don't compare exactly.
+Median time to first command (ms), tree on tmpfs. Currently: GN-style
+~71 (arm64) / ~33.5 (x86-64), CMake-style ~50 / ~32, from 670 / 636 and
+817 / 757 for upstream ninja.
+
+Run-to-run noise is large (medians move by ±5 ms on arm64, ±0.5 ms on
+x86-64), so compare builds with interleaved runs (`compare.py`) rather
+than back-to-back batches. The arm64 column comes from one interleaved run
+of all the commits' binaries (40-130 runs each); the x86-64 one from
+comparisons against the previous commit, made over several sessions, so
+its rows don't compare exactly. `sh-floor` is the time for `/bin/sh -c
+fakecc`; since simple commands no longer go through the shell, spawning
+fakecc directly (~1-2 ms) is the floor.
 
 | Change                         | arm64 | x86-64 |
 |--------------------------------|------:|-------:|
