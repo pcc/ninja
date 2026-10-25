@@ -42,11 +42,15 @@ Tools live in `misc/bench/`:
   spawn `/bin/sh -c fakecc` directly, i.e. the floor for any ninja.
 - `bench.py` – driver: `setup` (generate + full build), `rebuild` (redo the
   full build, e.g. after a log format change), `run`.
+- `compare.py` – A/B comparison of two binaries, interleaved (A B A B ...)
+  in batches of 5 runs; `--cpu` compares the CPU time of `ninja -n` runs,
+  which is steadier when the machine is short of cores.
 
 Usage:
 
     misc/bench/bench.py setup --ninja build/ninja /mnt/tb/bench
     misc/bench/bench.py run -n 10 --ninja build/ninja /mnt/tb/bench
+    misc/bench/compare.py --rounds 12 /mnt/tb/bench /tmp/ninja-prev build/ninja
 
 Unit tests: `./build/ninja_test`; end-to-end: `ln -s build/ninja ninja &&
 python3 misc/output_test.py` (needs `script`, from util-linux-script).
@@ -172,8 +176,9 @@ manifest cache and the logs (node creation, ~27k page faults), and the
 prefetch's deps summaries. Timeline on x86-64 (ms): loads done ~15, the
 deps-log ids are all stat()ed at ~25 (that gates everything), edges pass
 ~2.5, serial scan ~3.4, plan ~0.7, then the command starts (~2 ms to
-exec). `tools/tpx.sh` (outside the repo) instruments a copy of the tree
-with timestamps.
+exec). (Timelines like this came from a copy of the tree with timestamps
+printed at those points, and phases of CPU time from `perf record -g` of
+`ninja -n` runs, grouped by the function they're under.)
 
 Tried without gain (or worse): starting the early stats right after reading
 the deps log (they compete with the loads), urgent ParallelFor helpers,
