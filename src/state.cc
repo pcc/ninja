@@ -157,6 +157,13 @@ Node* PathMap::GetOrCreate(StringPiece path, uint64_t hash,
   return node;
 }
 
+void PathMap::Erase(StringPiece path) {
+  Key key = { path, Hash(path) };
+  Shard& shard = ShardFor(key.hash);
+  std::lock_guard<std::mutex> lock(shard.mutex);
+  shard.map.erase(key);
+}
+
 size_t PathMap::size() const {
   size_t size = 0;
   for (const Shard& shard : shards_)

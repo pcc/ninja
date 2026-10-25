@@ -36,10 +36,6 @@ enum PhonyCycleAction {
 
 struct ManifestParserOptions {
   PhonyCycleAction phony_cycle_action_ = kPhonyCycleActionWarn;
-  /// If set, called once the top-level file (and its includes) has been
-  /// processed, i.e. once the top-level variables are known (but while
-  /// other files may still be parsed concurrently).
-  std::function<void()> top_level_scope_done_;
 };
 
 /// Parses .ninja files.

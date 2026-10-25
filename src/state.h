@@ -111,6 +111,9 @@ struct PathMap {
 
   static uint64_t Hash(StringPiece path);
 
+  /// Remove the node for \a path (which is not freed).
+  void Erase(StringPiece path);
+
   size_t size() const;
   size_t bucket_count() const;
 

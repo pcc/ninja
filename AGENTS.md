@@ -106,8 +106,12 @@ Machines used:
   the merge appends them (ids) and connects their nodes. The parsed files'
   temporary data is freed on a background thread (RunDetached).
 - The deps log is loaded entirely while the manifest is parsed
-  (DepsLog::LoadWithoutSideEffects, in an urgent task that skips the queue
-  of parse tasks) unless that would have side effects (corrupt log).
+  (DepsLog::CreateNodes + LoadWithoutSideEffects) unless that would have
+  side effects (corrupt log). This starts right away, assuming no builddir;
+  if the manifest sets one, DepsLog::UndoSpeculativeLoad() removes the
+  (still provisional) nodes it created and forgets the log.
+  (Parallelizing the deps log's checks/loading further was tried: it only
+  competes with the parse.)
 - The deps log's nodes are stat()ed on other threads while the manifest is
   still parsed (DepsLog::StartEarlyStats, chunks of 256 re-queued so parse
   tasks interleave). Results stay in per-id arrays; Prefetch() applies them

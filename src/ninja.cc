@@ -178,10 +178,6 @@ struct NinjaMain : public BuildLogUser {
     DepsLog::PendingLoadPtr deps_log;
     /// Whether deps_log_ was loaded already (LoadWithoutSideEffects()).
     bool deps_log_loaded = false;
-    /// Counts the steps done before nodes for the deps log can be created:
-    /// reading it, and knowing that builddir is empty.
-    std::atomic<int> deps_steps{0};
-    bool builddir_empty = false;
     TaskGroup tasks;
   };
   std::unique_ptr<SpeculativeLogs> speculative_logs_;
@@ -190,13 +186,7 @@ struct NinjaMain : public BuildLogUser {
   /// OpenDepsLog() use the results if they apply.
   void StartLoadingLogs();
 
-  /// To be called by the manifest parser once the top-level variables are
-  /// known.
-  void TopLevelScopeDone();
 
-  /// Create the deps log's nodes on another thread, if the deps log has
-  /// been read and builddir is known to be empty.
-  void DepsLogStepDone();
 
   /// The type of functions that are the entry points to tools (subcommands).
   typedef int (NinjaMain::*ToolFunc)(const Options*, int, char**);
@@ -1571,34 +1561,15 @@ void NinjaMain::StartLoadingLogs() {
     logs->build_log_status = logs->build_log.Load(
         ".ninja_log", &logs->build_log_err, /*may_modify=*/false);
   });
+  // While the manifest is parsed, create the nodes for the deps log, stat()
+  // them, and load the log, if that has no side effects.  This assumes that
+  // the log is at the default location: if not, OpenDepsLog() undoes it.
   logs->tasks.Run([this, logs] {
     logs->deps_log = DepsLog::Read(".ninja_deps");
-    DepsLogStepDone();
+    DepsLog::CreateNodes(logs->deps_log.get(), &state_);
+    DepsLog::StartEarlyStats(logs->deps_log.get(), &disk_interface_);
+    logs->deps_log_loaded = deps_log_.LoadWithoutSideEffects(&logs->deps_log);
   });
-}
-
-void NinjaMain::TopLevelScopeDone() {
-  if (!speculative_logs_)
-    return;
-  speculative_logs_->builddir_empty =
-      state_.bindings_.LookupVariable("builddir").empty();
-  DepsLogStepDone();
-}
-
-void NinjaMain::DepsLogStepDone() {
-  SpeculativeLogs* logs = speculative_logs_.get();
-  if (logs->deps_steps.fetch_add(1, std::memory_order_acq_rel) != 1 ||
-      !logs->builddir_empty)
-    return;
-  // This is on the way to the scan, unlike most of the parse.
-  logs->tasks.Run(
-      [this, logs] {
-        DepsLog::CreateNodes(logs->deps_log.get(), &state_);
-        DepsLog::StartEarlyStats(logs->deps_log.get(), &disk_interface_);
-        logs->deps_log_loaded =
-            deps_log_.LoadWithoutSideEffects(&logs->deps_log);
-      },
-      /*urgent=*/true);
 }
 
 bool NinjaMain::OpenBuildLog(bool recompact_only) {
@@ -1661,8 +1632,14 @@ bool NinjaMain::OpenDepsLog(bool recompact_only) {
   string err;
   LoadStatus status;
   SpeculativeLogs* logs = speculative_logs_.get();
-  if (logs && build_dir_.empty()) {
+  if (logs) {
     logs->tasks.Wait();
+    // The manifest says that the logs are elsewhere.
+    if (!build_dir_.empty())
+      deps_log_.UndoSpeculativeLoad(
+          logs->deps_log_loaded ? nullptr : logs->deps_log.get(), &state_);
+  }
+  if (logs && build_dir_.empty()) {
     if (logs->deps_log_loaded) {
       deps_log_.FinishLoadWithoutSideEffects();
       status = LOAD_SUCCESS;
@@ -2092,7 +2069,6 @@ NORETURN void real_main(int argc, char** argv) {
     if (options.phony_cycle_should_err) {
       parser_opts.phony_cycle_action_ = kPhonyCycleActionError;
     }
-    parser_opts.top_level_scope_done_ = [&ninja] { ninja.TopLevelScopeDone(); };
     ManifestParser parser(&ninja.state_, &ninja.disk_interface_, parser_opts);
     if (!options.tool || options.tool->when == Tool::RUN_AFTER_LOGS)
       ninja.StartLoadingLogs();

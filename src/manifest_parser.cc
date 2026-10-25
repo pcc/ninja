@@ -1815,8 +1815,6 @@ bool ManifestParser::ParseRoot(void* root_file, string* err) {
 
   std::unique_ptr<ParsedFile> root(static_cast<ParsedFile*>(root_file));
   ProcessFile(&ctx, root.get(), env_, true);
-  if (options_.top_level_scope_done_)
-    options_.top_level_scope_done_();
 
   Merger merger(this);
   bool ok = merger.Merge(root.get(), err);

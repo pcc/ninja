@@ -722,6 +722,31 @@ build foo: sleep
                     proc.wait()
                     self.assertEqual(proc.returncode, 130, msg=f"For signal {signum}")
 
+    def test_deps_log_at_default_location_with_builddir(self) -> None:
+        """A deps log at the default location is not used if the manifest
+        sets builddir (Ninja may read it before knowing that)."""
+        plan = r"""rule cc
+  command = printf '%s: %s bogus.h\n' $out $in > $out.d && touch $out
+  deps = gcc
+  depfile = $out.d
+
+build out.o: cc in.c
+"""
+        with BuildDir(plan) as b:
+            open(os.path.join(b.path, "in.c"), "w").close()
+            open(os.path.join(b.path, "bogus.h"), "w").close()
+            b.run("out.o", pipe=True)
+            self.assertIn("bogus.h", b.run("-t deps", pipe=True))
+            with open(os.path.join(b.path, "build.ninja"), "a") as f:
+                f.write("builddir = sub\n")
+            # The deps of out.o are now in (the missing) sub/.ninja_deps.
+            self.assertEqual(b.run("-t deps", pipe=True), "")
+            result = subprocess.run([NINJA_PATH, "-t", "query", "bogus.h"],
+                                    cwd=b.path, env=default_env,
+                                    capture_output=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(b"unknown target 'bogus.h'", result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -128,6 +128,11 @@ struct DepsLog {
   /// LoadWithoutSideEffects().
   void FinishLoadWithoutSideEffects();
 
+  /// Undo CreateNodes() and LoadWithoutSideEffects() (if \a pending is
+  /// null, it succeeded): forget the log and remove the nodes that it
+  /// created that the manifest didn't refer to.
+  void UndoSpeculativeLoad(PendingLoad* pending, State* state);
+
   /// Return the mtime that the early stat() of the node with the given id
   /// returned (waiting for it if needed), or -1 if there is none (then
   /// stat() it as usual).  Must be called at most once per id.

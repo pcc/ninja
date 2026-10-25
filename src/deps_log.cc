@@ -509,6 +509,28 @@ bool DepsLog::LoadWithoutSideEffects(PendingLoadPtr* pending_ptr) {
   return true;
 }
 
+void DepsLog::UndoSpeculativeLoad(PendingLoad* pending, State* state) {
+  std::vector<Node*> nodes;
+  if (pending) {
+    for (Node* node : pending->nodes)
+      if (node)
+        nodes.push_back(node);
+  } else {
+    nodes.swap(nodes_);
+    for (Node* node : nodes)
+      node->set_id(-1);
+    for (Deps* deps : deps_)
+      delete deps;
+    deps_.clear();
+    early_stats_.reset();
+    needs_recompaction_ = false;
+  }
+  // Nodes that the manifest didn't refer to are still provisional.
+  for (Node* node : nodes)
+    if (node->slash_bits_provisional())
+      state->paths_.Erase(node->path());
+}
+
 void DepsLog::FinishLoadWithoutSideEffects() {
   // As in Load().
   for (Node* node : nodes_)
