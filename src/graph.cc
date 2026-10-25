@@ -1118,16 +1118,13 @@ std::optional<EdgeInputsRange> ImplicitDepLoader::LoadDepsFromLog(Edge* edge,
     return std::nullopt;
   }
 
-  Node** nodes = deps->nodes;
-  const size_t node_count = deps->node_count;
-  const auto implicit_dep = edge->inputs_.end() - edge->order_only_deps_;
-
-  edge->implicit_deps_ += static_cast<int>(node_count);
-  for (size_t i = 0; i < node_count; ++i) {
-    AddDepOutEdge(nodes[i], edge);
+  const int node_count = deps->node_count;
+  const auto begin = PreallocateSpace(edge, node_count);
+  for (int i = 0; i < node_count; ++i) {
+    Node* node = deps->nodes[i];
+    begin[i] = node;
+    AddDepOutEdge(node, edge);
   }
-
-  const auto begin = edge->inputs_.insert(implicit_dep, nodes, nodes + node_count);
   return EdgeInputsRange(edge, begin, begin + node_count);
 }
 

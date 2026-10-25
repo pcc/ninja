@@ -15,6 +15,7 @@
 #ifndef NINJA_DEPS_LOG_H_
 #define NINJA_DEPS_LOG_H_
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -66,7 +67,7 @@ struct State;
 /// wins, allowing updates to just be appended to the file.  A separate
 /// repacking step can run occasionally to remove dead records.
 struct DepsLog {
-  DepsLog() : needs_recompaction_(false), file_(NULL) {}
+  DepsLog();
   ~DepsLog();
 
   // Writing (build-time) interface.
@@ -78,12 +79,23 @@ struct DepsLog {
 
   // Reading (startup-time) interface.
   struct Deps {
-    Deps(int64_t mtime, int node_count)
-        : mtime(mtime), node_count(node_count), nodes(new Node*[node_count]) {}
-    ~Deps() { delete [] nodes; }
+    /// The nodes, as ids into the log's table of nodes.  For deps loaded
+    /// from the log, the ids point into the loaded file, so that loading
+    /// doesn't need to convert or copy them.
+    struct Nodes {
+      Node* operator[](int i) const { return (*table)[ids[i]]; }
+      const int* ids;
+      const std::vector<Node*>* table;
+    };
+
+    Deps(TimeStamp mtime, int node_count, const int* ids,
+         const std::vector<Node*>* table)
+        : mtime(mtime), node_count(node_count), nodes{ ids, table } {}
     TimeStamp mtime;
     int node_count;
-    Node** nodes;
+    Nodes nodes;
+    /// The storage for the ids, unless they point into the loaded file.
+    std::unique_ptr<int[]> owned_ids;
   };
   LoadStatus Load(const std::string& path, State* state, std::string* err);
   Deps* GetDeps(Node* node);
@@ -118,6 +130,10 @@ struct DepsLog {
   bool needs_recompaction_;
   FILE* file_;
   std::string file_path_;
+
+  /// The contents of loaded files, which deps point into.
+  struct LoadedFile;
+  std::vector<std::unique_ptr<LoadedFile> > loaded_files_;
 
   /// Maps id -> Node.
   std::vector<Node*> nodes_;

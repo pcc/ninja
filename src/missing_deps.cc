@@ -92,8 +92,12 @@ void MissingDependencyScanner::ProcessNode(Node* node) {
   std::string deps_type = edge->GetBinding("deps");
   if (!deps_type.empty()) {
     DepsLog::Deps* deps = deps_log_->GetDeps(node);
-    if (deps)
-      ProcessNodeDeps(node, deps->nodes, deps->node_count);
+    if (deps) {
+      std::vector<Node*> dep_nodes(deps->node_count);
+      for (int i = 0; i < deps->node_count; ++i)
+        dep_nodes[i] = deps->nodes[i];
+      ProcessNodeDeps(node, dep_nodes.data(), deps->node_count);
+    }
   } else {
     DepfileParserOptions parser_opts;
     std::vector<Node*> depfile_deps;
