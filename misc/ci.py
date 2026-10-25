@@ -5,6 +5,7 @@ import os
 ignores = [
 	'.git/',
 	'misc/afl-fuzz-tokens/',
+	'simd/',
 	'src/depfile_parser.cc',
 	'src/lexer.cc',
 ]
