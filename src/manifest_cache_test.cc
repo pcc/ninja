@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <map>
 
+#include "build_log.h"
 #include "disk_interface.h"
 #include "graph.h"
 #include "state.h"
@@ -113,6 +114,22 @@ string Describe(State* state) {
   return out;
 }
 
+/// Check that the bindings precomputed for the scan are right.
+void CheckScanBindings(State* state) {
+  for (Edge* edge : state->edges_) {
+    const Edge::ScanBindings& b = edge->scan_bindings_;
+    ASSERT_TRUE(b.precomputed);
+    EXPECT_EQ(edge->GetBindingBool("restat"), b.restat);
+    EXPECT_EQ(edge->GetBindingBool("generator"), b.generator);
+    bool has_deps = !edge->GetBinding("deps").empty();
+    EXPECT_EQ(has_deps, b.has_deps);
+    EXPECT_EQ(has_deps ? "" : edge->GetUnescapedDepfile(), b.depfile);
+    EXPECT_TRUE(b.command_hash_valid);
+    EXPECT_EQ(BuildLog::LogEntry::HashCommand(edge->EvaluateCommand(true)),
+              b.command_hash);
+  }
+}
+
 struct ManifestCacheTest : public testing::Test {
   void SetUp() override {
     temp_dir_.CreateAndEnter("ManifestCacheTest");
@@ -141,6 +158,7 @@ struct ManifestCacheTest : public testing::Test {
     ASSERT_TRUE(ManifestCache::Load(kCachePath, input, ManifestParserOptions(),
                                     &loaded));
     EXPECT_EQ(Describe(&parsed), Describe(&loaded));
+    CheckScanBindings(&loaded);
   }
 
   bool WriteFile(const string& path, const string& contents) {
@@ -169,6 +187,14 @@ TEST_F(ManifestCacheTest, RoundTrip) {
 "rule link\n"
 "  command = link $in -o $out\n"
 "  pool = link\n"
+"  restat = 1\n"
+"  rspfile = $out.rsp\n"
+"  rspfile_content = $in_newline\n"
+"rule regen\n"
+"  command = regen\n"
+"  generator = 1\n"
+"  depfile = build.ninja.d\n"
+"build build.ninja: regen gen.py\n"
 "build a.o: cc a.c | a.h || gen\n"
 "  x = -O2\n"
 "build b.o: cc b.c\n"
@@ -225,6 +251,7 @@ TEST_F(ManifestCacheTest, External) {
   ASSERT_TRUE(
       ManifestCache::Load(cache, file, ManifestParserOptions(), &loaded));
   EXPECT_TRUE(Describe(&parsed) == Describe(&loaded));
+  CheckScanBindings(&loaded);
   ASSERT_EQ(0, chdir((temp_dir_.start_dir_ + "/" + temp_dir_.temp_dir_name_)
                          .c_str()));
 }

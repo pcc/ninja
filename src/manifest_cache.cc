@@ -24,6 +24,7 @@
 #include <memory>
 #include <vector>
 
+#include "build_log.h"
 #include "disk_interface.h"
 #include "eval_env.h"
 #include "graph.h"
@@ -48,6 +49,7 @@
 //   their bindings.
 // - The pools (except the built-in ones).
 // - The edges, in order, and the nodes of the edges.
+// - The bindings of the edges that the scan needs (see Edge::ScanBindings).
 // - The default targets.
 // Integers are in the machine's byte order.  The bindings of the scopes
 // refer to the cache's contents (which are kept), rather than being copied.
@@ -55,7 +57,7 @@
 namespace {
 
 const char kMagic[] = "# ninja manifest cache\n";
-const uint32_t kFormatVersion = 2;
+const uint32_t kFormatVersion = 3;
 const uint32_t kNone = 0xFFFFFFFF;
 /// Indices of the built-in pools.
 const uint32_t kDefaultPool = 0;
@@ -105,6 +107,18 @@ struct EdgeRecord {
   uint32_t dyndep;
   /// The index of the edge's first node in the array of the edges' nodes.
   uint32_t nodes;
+  uint32_t padding;
+};
+
+struct ScanBindingsRecord {
+  enum Flags {
+    kRestat = 1,
+    kGenerator = 2,
+    kHasDeps = 4,
+  };
+  uint64_t command_hash;
+  StringRef depfile;
+  uint32_t flags;
   uint32_t padding;
 };
 
@@ -391,6 +405,30 @@ bool ManifestCache::Save(const std::string& path,
     else
       edges[i].pool = pool_indices[edge->pool_];
   }
+  // The bindings that the scan needs.
+  std::vector<ScanBindingsRecord> scan_bindings(edges.size());
+  std::vector<std::string> depfiles(edges.size());
+  ParallelFor(edges.size(), 64, [&](size_t begin, size_t end) {
+    std::string command;
+    for (size_t i = begin; i < end; ++i) {
+      Edge* edge = state.edges_[i];
+      ScanBindingsRecord& record = scan_bindings[i];
+      record.flags = 0;
+      if (edge->GetBindingBool("restat"))
+        record.flags |= ScanBindingsRecord::kRestat;
+      if (edge->GetBindingBool("generator"))
+        record.flags |= ScanBindingsRecord::kGenerator;
+      if (!edge->GetBinding("deps").empty())
+        record.flags |= ScanBindingsRecord::kHasDeps;
+      else
+        depfiles[i] = edge->GetUnescapedDepfile();
+      command.clear();
+      edge->EvaluateCommandInto(&command, /*incl_rsp_file=*/true);
+      record.command_hash = BuildLog::LogEntry::HashCommand(command);
+    }
+  });
+  for (size_t i = 0; i < edges.size(); ++i)
+    scan_bindings[i].depfile = string_ref(depfiles[i], false);
   if (too_big || edge_nodes.size() >= kNone)
     return false;
 
@@ -404,6 +442,7 @@ bool ManifestCache::Save(const std::string& path,
   w.Array(pools);
   w.Array(edges);
   w.Array(edge_nodes);
+  w.Array(scan_bindings);
   w.Array(defaults);
   w.out.append(kMagic);
 
@@ -485,6 +524,9 @@ bool ManifestCache::Load(const std::string& path,
   const PoolRecord* pools = r.Array<PoolRecord>(&pool_count);
   const EdgeRecord* edges = r.Array<EdgeRecord>(&edge_count);
   const uint32_t* edge_nodes = r.Array<uint32_t>(&edge_node_count);
+  size_t scan_bindings_count;
+  const ScanBindingsRecord* scan_bindings =
+      r.Array<ScanBindingsRecord>(&scan_bindings_count);
   const uint32_t* defaults = r.Array<uint32_t>(&default_count);
   if (!r.ok || !r.Need(kMagicSize) || memcmp(r.p, kMagic, kMagicSize) != 0)
     return false;
@@ -496,7 +538,8 @@ bool ManifestCache::Load(const std::string& path,
   auto str = [&](StringRef ref) {
     return StringPiece(strings.str_ + ref.offset, ref.size);
   };
-  if (env_count == 0 || env_records[0].parent != kNone)
+  if (env_count == 0 || env_records[0].parent != kNone ||
+      scan_bindings_count != edge_count)
     return false;
   for (size_t i = 0; i < rule_count; ++i) {
     const RuleRecord& rule = rules[i];
@@ -542,7 +585,8 @@ bool ManifestCache::Load(const std::string& path,
                    edge.ins &&
                (edge.dyndep < node_count || edge.dyndep == kNone) &&
                edge.nodes <= edge_node_count &&
-               count <= edge_node_count - edge.nodes;
+               count <= edge_node_count - edge.nodes &&
+               string_ok(scan_bindings[i].depfile);
       }) ||
       !CheckAll(edge_node_count,
                 [&](size_t i) { return edge_nodes[i] < node_count; }) ||
@@ -626,6 +670,15 @@ bool ManifestCache::Load(const std::string& path,
         node = node_ptrs[*index++];
       if (record.dyndep != kNone)
         edge->dyndep_ = node_ptrs[record.dyndep];
+      const ScanBindingsRecord& scan = scan_bindings[i];
+      Edge::ScanBindings& b = edge->scan_bindings_;
+      b.precomputed = true;
+      b.restat = scan.flags & ScanBindingsRecord::kRestat;
+      b.generator = scan.flags & ScanBindingsRecord::kGenerator;
+      b.has_deps = scan.flags & ScanBindingsRecord::kHasDeps;
+      b.depfile = str(scan.depfile).AsString();
+      b.command_hash = scan.command_hash;
+      b.command_hash_valid = true;
       edge_ptrs[i] = edge;
     }
   });

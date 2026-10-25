@@ -461,11 +461,13 @@ void DependencyScan::Prefetch(Node* initial_node) {
     for (size_t i = begin; i < end; ++i) {
       Edge* edge = edges[i];
       Edge::ScanBindings& b = edge->scan_bindings_;
-      b.restat = edge->GetBindingBool("restat");
-      b.generator = edge->GetBindingBool("generator");
-      b.has_deps = !edge->GetBinding("deps").empty();
-      if (!b.has_deps)
-        b.depfile = edge->GetUnescapedDepfile();
+      if (!b.precomputed) {
+        b.restat = edge->GetBindingBool("restat");
+        b.generator = edge->GetBindingBool("generator");
+        b.has_deps = !edge->GetBinding("deps").empty();
+        if (!b.has_deps)
+          b.depfile = edge->GetUnescapedDepfile();
+      }
 
       for (Node* output : edge->outputs_)
         stat_node(output);
@@ -510,6 +512,8 @@ void DependencyScan::Prefetch(Node* initial_node) {
                   build_log_->LookupByOutput(output->path())) {
             if (output == edge->outputs_[0])
               b.first_output_log_entry = entry;
+            if (b.precomputed)
+              break;
             // Reuse the memory for the commands.
             thread_local std::string command;
             command.clear();

@@ -335,6 +335,10 @@ struct Edge {
   /// (and in parallel) by DependencyScan::Prefetch().
   struct ScanBindings {
     bool valid = false;
+    /// Whether the bindings (restat, generator, has_deps, depfile and
+    /// command_hash) were set ahead of time, from the manifest cache: they
+    /// only depend on the manifest.
+    bool precomputed = false;
     bool restat = false;
     bool generator = false;
     /// Whether the "deps" binding is non-empty.
