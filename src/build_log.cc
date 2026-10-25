@@ -34,6 +34,7 @@
 #endif
 
 #include "build.h"
+#include "char_scan.h"
 #include "graph.h"
 #include "metrics.h"
 #include "thread_pool.h"
@@ -167,15 +168,29 @@ int64_t ParseDecimal(const char* begin, const char* end) {
   bool negative = p != end && *p == '-';
   p += negative;
   uint64_t value = 0;
-  if (end - p <= 18) {
-    for (; p != end && *p >= '0' && *p <= '9'; ++p)
+  // 19 digits fit in 64 bits.
+  if (end - p <= 19) {
+    for (; p != end && static_cast<unsigned>(*p - '0') < 10; ++p)
       value = value * 10 + (*p - '0');
   }
-  if (p == end)
+  if (p == end && value <= static_cast<uint64_t>(INT64_MAX))
     return negative ? -static_cast<int64_t>(value) : value;
   std::string copy(begin, end);
   return strtoll(copy.c_str(), NULL, 10);
 }
+
+/// The values of hexadecimal digits, or 16 for other characters.
+struct HexDigits {
+  HexDigits() {
+    memset(values, 16, sizeof(values));
+    for (int i = 0; i < 10; ++i)
+      values['0' + i] = static_cast<uint8_t>(i);
+    for (int i = 0; i < 6; ++i)
+      values['a' + i] = values['A' + i] = static_cast<uint8_t>(10 + i);
+  }
+  uint8_t values[256];
+};
+const HexDigits kHexDigits;
 
 /// Parse a hexadecimal integer the way strtoull() does, quickly in the
 /// usual case.
@@ -184,15 +199,8 @@ uint64_t ParseHex(const char* begin, const char* end) {
   uint64_t value = 0;
   if (end - p <= 16) {
     for (; p != end; ++p) {
-      char c = *p;
-      int digit;
-      if (c >= '0' && c <= '9')
-        digit = c - '0';
-      else if (c >= 'a' && c <= 'f')
-        digit = c - 'a' + 10;
-      else if (c >= 'A' && c <= 'F')
-        digit = c - 'A' + 10;
-      else
+      unsigned digit = kHexDigits.values[static_cast<unsigned char>(*p)];
+      if (digit == 16)
         break;
       value = value * 16 + digit;
     }
@@ -212,40 +220,36 @@ struct ParsedEntry {
   uint64_t command_hash;
 };
 
-/// Parse the complete lines in [\a p, \a end).
+/// Parse the complete lines in [\a p, \a end).  The data ends with NULs
+/// (see FindFirstOf()).
 void ParseLines(const char* p, const char* end,
                 std::vector<ParsedEntry>* entries) {
-  const char kFieldSeparator = '\t';
   while (p < end) {
-    const char* line_end =
-        static_cast<const char*>(memchr(p, '\n', end - p));
-    if (!line_end)
-      break;
+    // The fields are separated by tabs.
     const char* start = p;
-    p = line_end + 1;
-    if (static_cast<size_t>(line_end - start) >= kMaxLineSize)
-      continue;
-
-    const char* fields[4];
-    for (int i = 0; i < 4; ++i) {
-      const char* field_end = static_cast<const char*>(
-          memchr(start, kFieldSeparator, line_end - start));
-      if (!field_end)
+    const char* fields[5];
+    int count = 0;
+    for (;; ++p) {
+      p = FindFirstOf<'\t', '\n', '\0'>(p);
+      if (p >= end || *p == '\n')
         break;
-      fields[i] = start;
-      start = field_end + 1;
-      if (i == 3) {
-        ParsedEntry entry;
-        entry.start_time = static_cast<int>(ParseDecimal(fields[0],
-                                                         fields[1] - 1));
-        entry.end_time = static_cast<int>(ParseDecimal(fields[1],
-                                                       fields[2] - 1));
-        entry.mtime = ParseDecimal(fields[2], fields[3] - 1);
-        entry.output = StringPiece(fields[3], field_end - fields[3]);
-        entry.command_hash = ParseHex(start, line_end);
-        entries->push_back(entry);
-      }
+      if (*p == '\t' && count < 4)
+        fields[count++] = p;
     }
+    if (p >= end)
+      break;  // A line without a newline.
+    const char* line_end = p++;
+    if (count < 4 || static_cast<size_t>(line_end - start) >= kMaxLineSize)
+      continue;
+    ParsedEntry entry;
+    entry.start_time = static_cast<int>(ParseDecimal(start, fields[0]));
+    entry.end_time =
+        static_cast<int>(ParseDecimal(fields[0] + 1, fields[1]));
+    entry.mtime = ParseDecimal(fields[1] + 1, fields[2]);
+    entry.output = StringPiece(fields[2] + 1, fields[3] - fields[2] - 1);
+    // The rest of the line (which may have tabs) is the hash.
+    entry.command_hash = ParseHex(fields[3] + 1, line_end);
+    entries->push_back(entry);
   }
 }
 
@@ -256,7 +260,7 @@ LoadStatus BuildLog::Load(const std::string& path, std::string* err,
   METRIC_RECORD(".ninja_log load");
   RealDiskInterface disk;
   FileContents contents;
-  switch (disk.LoadFile(path, 0, &contents, err)) {
+  switch (disk.LoadFile(path, kCharScanPadding, &contents, err)) {
   case FileReader::Okay:
     break;
   case FileReader::NotFound:

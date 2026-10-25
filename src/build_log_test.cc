@@ -305,6 +305,36 @@ TEST_F(BuildLogTest, VeryLongInputLine) {
   ASSERT_NO_FATAL_FAILURE(AssertHash("command2", e->command_hash));
 }
 
+TEST_F(BuildLogTest, BigLog) {
+  // Big logs are parsed in chunks; later entries replace earlier ones.
+  FILE* f = fopen(kTestFilename, "wb");
+  fprintf(f, "# ninja log v7\n");
+  const int kCount = 20000;
+  for (int i = 0; i < kCount; ++i) {
+    fprintf(f, "%d\t%d\t%" PRId64 "\tout%d\t%" PRIx64 "\n", i, i + 1,
+            static_cast<int64_t>(1700000000123456789LL + i), i % (kCount / 2),
+            static_cast<uint64_t>(static_cast<uint64_t>(i) *
+                                  0x9E3779B97F4A7C15ULL));
+  }
+  fclose(f);
+
+  std::string err;
+  BuildLog log;
+  EXPECT_TRUE(log.Load(kTestFilename, &err));
+  ASSERT_EQ("", err);
+  ASSERT_EQ(static_cast<size_t>(kCount / 2), log.entries().size());
+  for (int i = kCount / 2; i < kCount; ++i) {
+    BuildLog::LogEntry* e =
+        log.LookupByOutput("out" + std::to_string(i % (kCount / 2)));
+    ASSERT_TRUE(e);
+    EXPECT_EQ(i, e->start_time);
+    EXPECT_EQ(i + 1, e->end_time);
+    EXPECT_EQ(1700000000123456789LL + i, e->mtime);
+    EXPECT_EQ(static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL,
+              e->command_hash);
+  }
+}
+
 TEST_F(BuildLogTest, MultiTargetEdge) {
   AssertParse(&state_,
 "build out out.d: cat\n");
