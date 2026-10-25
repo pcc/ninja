@@ -345,26 +345,46 @@ void DependencyScan::Prefetch(Node* initial_node) {
   METRIC_RECORD("scan prefetch");
 
   // Collect the edges that RecomputeDirty() will visit, as far as the
-  // manifest tells.
+  // manifest tells, level by level, in parallel.  Edges are claimed by id.
   std::vector<Edge*> edges;
-  std::vector<Node*> stack(1, initial_node);
-  while (!stack.empty()) {
-    Node* node = stack.back();
-    stack.pop_back();
+  std::unique_ptr<std::atomic<bool>[]> claimed(
+      new std::atomic<bool>[state_->edges_.size()]);
+  for (size_t i = 0; i < state_->edges_.size(); ++i)
+    claimed[i].store(false, std::memory_order_relaxed);
+  auto claim = [&](Node* node, std::vector<Edge*>* out) {
     Edge* edge = node->in_edge();
     if (!edge || edge->mark_ != Edge::VisitNone || edge->scan_bindings_.valid)
-      continue;
-    // Set it early to avoid queueing edges twice; nothing reads it until the
-    // prefetch is done.
-    edge->scan_bindings_.valid = true;
-    edges.push_back(edge);
-    for (Node* input : edge->inputs_)
-      if (input->in_edge())
-        stack.push_back(input);
-    for (Node* validation : edge->validations_)
-      if (validation->in_edge())
-        stack.push_back(validation);
+      return;
+    // (Edges that aren't in the State are left to RecomputeDirty().)
+    if (edge->id_ >= state_->edges_.size() ||
+        state_->edges_[edge->id_] != edge ||
+        claimed[edge->id_].load(std::memory_order_relaxed) ||
+        claimed[edge->id_].exchange(true, std::memory_order_relaxed))
+      return;
+    out->push_back(edge);
+  };
+  std::vector<Edge*> level;
+  claim(initial_node, &level);
+  while (!level.empty()) {
+    edges.insert(edges.end(), level.begin(), level.end());
+    const size_t kGrain = 16;
+    std::vector<std::vector<Edge*>> next((level.size() + kGrain - 1) / kGrain);
+    ParallelFor(level.size(), kGrain, [&](size_t begin, size_t end) {
+      std::vector<Edge*>* out = &next[begin / kGrain];
+      for (size_t i = begin; i < end; ++i) {
+        for (Node* input : level[i]->inputs_)
+          claim(input, out);
+        for (Node* validation : level[i]->validations_)
+          claim(validation, out);
+      }
+    });
+    level.clear();
+    for (const std::vector<Edge*>& found : next)
+      level.insert(level.end(), found.begin(), found.end());
   }
+  // Nothing reads this until the prefetch is done.
+  for (Edge* edge : edges)
+    edge->scan_bindings_.valid = true;
 
   // stat() a node (if not known yet), on the thread that claimed it.
   auto stat = [this](Node* node) {

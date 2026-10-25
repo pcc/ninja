@@ -204,6 +204,7 @@ don't compare exactly.
 | (parallel build log parse)     |    84 |   (~0) |
 | nodes' edges in the cache      |    84 |     50 |
 | ParallelFor waits, doesn't steal |    79 |     49 |
+| parallel edge collection       |    85 |   48.6 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):
