@@ -275,6 +275,7 @@ fakecc directly (~1-2 ms) is the floor.
 | leaner serial scan loop        |    65 |   34.6 |
 | nodes made outside map locks   |    71 |   34.4 |
 | stat() via directory handles   |    71 |   33.5 |
+| workers started by a worker    |    71 |   32.9 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):

@@ -85,8 +85,15 @@ struct ThreadPool {
     sigfillset(&all);
     pthread_sigmask(SIG_SETMASK, &all, &old);
 #endif
-    for (size_t i = 0; i < workers_; ++i)
-      std::thread([this] { RunUntil([] { return false; }); }).detach();
+    // The first worker starts the others: that takes a while, and the
+    // caller has tasks to queue meanwhile.
+    if (workers_) {
+      std::thread([this] {
+        for (size_t i = 1; i < workers_; ++i)
+          std::thread([this] { RunUntil([] { return false; }); }).detach();
+        RunUntil([] { return false; });
+      }).detach();
+    }
 #ifndef _WIN32
     pthread_sigmask(SIG_SETMASK, &old, NULL);
 #endif
