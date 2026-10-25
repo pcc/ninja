@@ -17,6 +17,11 @@
 #ifdef __GLIBC__
 #include <malloc.h>
 #endif
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2132,6 +2137,23 @@ int main(int argc, char** argv) {
   // an mprotect() call, which takes the address space lock for writing
   // and makes the threads (and their page faults) wait for each other.
   mallopt(M_TOP_PAD, 64 << 20);
+#endif
+#ifndef _WIN32
+  // Grow the file descriptor table to the soft limit (up to some size)
+  // now, while there is a single thread: when the table is shared by
+  // several threads, Linux waits for an RCU grace period each time it grows
+  // it, which can take tens of milliseconds.
+  struct rlimit limit;
+  if (getrlimit(RLIMIT_NOFILE, &limit) == 0) {
+    const rlim_t kMaxSize = 4096;
+    int top = static_cast<int>(std::min<rlim_t>(limit.rlim_cur, kMaxSize)) - 1;
+    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+      if (top > fd && dup2(fd, top) == top)
+        close(top);
+      close(fd);
+    }
+  }
 #endif
 #if defined(_MSC_VER)
   // Set a handler to catch crashes not caught by the __try..__except

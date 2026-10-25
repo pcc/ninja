@@ -110,6 +110,10 @@ Machines used:
   allocating that serializes everything on the mmap lock (osq_lock in the
   kernel profile). Hence M_TOP_PAD in main().
 - Worker threads must block signals (see thread_pool.cc).
+- Once there are threads, growing the fd table makes Linux wait for an RCU
+  grace period each time (1000 opens: 0.3 ms single-threaded, 200 ms with
+  a second thread). main() grows it up front. (Stat'ing relative to cached
+  directory fds was tried: no gain once that is fixed.)
 - The shell aliases cp/rm to -i: use `command cp`/`command rm -f`.
 - `pkill -f` patterns can match the shell running them.
 
