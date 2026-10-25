@@ -149,6 +149,16 @@ Machines used:
   deps, depfile, command hash), which only depend on the manifest; the
   prefetch then doesn't evaluate them. `ManifestCacheTest.External` compares a
   cache-loaded graph with a parsed one for any manifest (see the test).
+- Simple commands run without /bin/sh (subprocess-posix.cc
+  SplitSimpleCommand, glibc only): words of characters that aren't special
+  to the shell, with quotes and backslashes removed as the shell would, the
+  first word a path containing '/' (so no builtins, keywords, assignments,
+  PATH lookup). Anything else, or a failed posix_spawn() (missing program,
+  script without #!), goes through the shell. Starting bash costs 4-7 ms.
+  $PWD is made right (ninja -C) as the shell would; the only remaining
+  differences in the environment are bash's `_` (and SHLVL when unset).
+  `SubprocessTest.CommandsWithAndWithoutShell` compares the arguments with
+  the shell's.
 - Leaf nodes loaded as deps don't get out-edges (flagged instead; dyndep
   recovers them if such a node gains an in-edge).
 
@@ -212,6 +222,7 @@ don't compare exactly.
 | early stats on all threads     |    87 |     47 |
 | fast path for deps summaries   |    86 |     46 |
 | static linking (CMake, Linux)  |    83 |     43 |
+| simple commands without /bin/sh|    70 |     35 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):
@@ -226,6 +237,8 @@ graph):
 | (small cleanups since)         |    76 |     69 |
 | manifest cache                 |    75 |     55 |
 | (deps walk, scan bindings)     |    71 |     51 |
+| (all since, before no-shell)   |    58 |     42 |
+| simple commands without /bin/sh|    52 |     35 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

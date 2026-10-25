@@ -18,6 +18,7 @@
 #include "test.h"
 
 #ifndef _WIN32
+#include <sys/stat.h>
 // SetWithLots need setrlimit.
 #include <signal.h>
 #include <stdio.h>
@@ -298,6 +299,64 @@ TEST_F(SubprocessTest, SetWithLots) {
   ASSERT_EQ(kNumProcs, subprocs_.finished_.size());
 }
 #endif  // !__APPLE__ && !_WIN32
+
+#ifndef _WIN32
+// Simple commands run without a shell; others (and failures to start the
+// program directly) go through the shell.
+TEST_F(SubprocessTest, CommandsWithAndWithoutShell) {
+  // A script without a "#!" line, which the shell runs itself.
+  FILE* f = fopen("SubprocessTest-script", "w");
+  ASSERT_TRUE(f);
+  fputs("echo script $1\n", f);
+  fclose(f);
+  ASSERT_EQ(0, chmod("SubprocessTest-script", 0755));
+  auto run = [this](const std::string& command, std::string* output) {
+    Subprocess* subproc = subprocs_.Add(command);
+    EXPECT_NE((Subprocess*)0, subproc);
+    while (!subproc->Done())
+      subprocs_.DoWork();
+    ExitStatus status = subproc->Finish();
+    *output = subproc->GetOutput();
+    delete subproc;
+    return status;
+  };
+  std::string output;
+  EXPECT_EQ(ExitSuccess, run("./SubprocessTest-script x", &output));
+  EXPECT_EQ("script x\n", output);
+  EXPECT_EQ(ExitStatus(127), run("./SubprocessTest-missing x", &output));
+  EXPECT_NE("", output);
+  unlink("SubprocessTest-script");
+
+  // The arguments are the same as with the shell (which "true;" forces).
+  const char* kArgs[] = {
+    "a-b.c/d,e:f@g%h+i=j\tk",
+    "-DFOO=\\\"bar\\\" -DX='a b' \"c d\" e\\ f",
+    "\"\" '' x\"\"y \"a\\\\b\" \"a\\b\" \"a\\$b\" 'a\\b' a\\\\b",
+    "\"it's\" 'say \"hi\"' @\"rsp file\" a=b",
+    "$((1 + 2)) $HOME `echo x` *.cc ~ {a,b} a#b #c",
+    "a | cat",
+    "a; /bin/echo b",
+    "a > /dev/null",
+    "\"unterminated",
+    "trailing\\",
+  };
+  // $PWD is right either way.
+  std::string direct_pwd, shell_pwd;
+  run("/usr/bin/printenv PWD", &direct_pwd);
+  run("true; /usr/bin/printenv PWD", &shell_pwd);
+  EXPECT_EQ(shell_pwd, direct_pwd);
+
+  for (const char* args : kArgs) {
+    std::string direct, shell;
+    ExitStatus direct_status =
+        run(std::string("/usr/bin/printf '<%s>' ") + args, &direct);
+    ExitStatus shell_status =
+        run(std::string("true; /usr/bin/printf '<%s>' ") + args, &shell);
+    EXPECT_EQ(shell_status, direct_status) << args;
+    EXPECT_EQ(shell, direct) << args;
+  }
+}
+#endif
 
 // TODO: this test could work on Windows, just not sure how to simply
 // read stdin.

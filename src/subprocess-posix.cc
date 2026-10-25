@@ -22,8 +22,12 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <spawn.h>
+
+#include <string>
+#include <vector>
 
 #if defined(USE_PPOLL)
 #include <poll.h>
@@ -37,9 +41,109 @@ extern char** environ;
 
 using namespace std;
 
+// Simple commands are run directly with glibc 2.24 or later, where
+// posix_spawn() reports exec() failures (older versions only did through the
+// exit status).
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || __GLIBC_MINOR__ >= 24)
+#define NINJA_SPAWN_SIMPLE_COMMANDS 1
+#endif
+
 namespace {
   ExitStatus ParseExitStatus(int status);
+
+#ifdef NINJA_SPAWN_SIMPLE_COMMANDS
+/// Split \a command into words if it is a simple command that /bin/sh would
+/// just execute: words of characters that are not special to the shell
+/// (except for quotes and backslashes, which are removed as the shell
+/// would), separated by spaces or tabs, the first one a path to the program
+/// (so that it isn't a builtin, a keyword, or an assignment).  Returns false
+/// for anything else (expansions, redirections, globs, several commands...).
+bool SplitSimpleCommand(const string& command, vector<string>* words) {
+  words->clear();
+  auto is_plain = [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || strchr("/._-+,:@%=", c);
+  };
+  // Characters that may be quoted (not newlines, which the shell may treat
+  // specially, nor anything that may depend on the locale).
+  auto is_quotable = [](char c) {
+    return c >= ' ' && c <= '~';
+  };
+  const size_t size = command.size();
+  size_t i = 0;
+  for (;;) {
+    while (i < size && (command[i] == ' ' || command[i] == '\t'))
+      ++i;
+    if (i == size)
+      break;
+    string word;
+    bool plain = true;
+    for (; i < size && command[i] != ' ' && command[i] != '\t'; ++i) {
+      char c = command[i];
+      if (is_plain(c)) {
+        word += c;
+        continue;
+      }
+      plain = false;
+      if (c == '\\') {
+        // The next character, literally.
+        if (i + 1 == size || !is_quotable(command[i + 1]))
+          return false;
+        word += command[++i];
+      } else if (c == '\'') {
+        // Everything up to the next single quote, literally.
+        for (++i; i < size && command[i] != '\''; ++i) {
+          if (!is_quotable(command[i]))
+            return false;
+          word += command[i];
+        }
+        if (i == size)
+          return false;
+      } else if (c == '"') {
+        // Up to the next double quote, without expansions.
+        for (++i; i < size && command[i] != '"'; ++i) {
+          c = command[i];
+          if (!is_quotable(c) || c == '$' || c == '`' || c == '!')
+            return false;
+          if (c == '\\' && i + 1 < size && strchr("\"\\", command[i + 1]))
+            c = command[++i];
+          word += c;
+        }
+        if (i == size)
+          return false;
+      } else {
+        return false;
+      }
+    }
+    if (words->empty() && (!plain || word.find('/') == string::npos ||
+                           word.find('=') != string::npos))
+      return false;
+    words->push_back(std::move(word));
+  }
+  return !words->empty();
 }
+#endif
+
+/// Make $PWD name the current directory, as the shell would for the
+/// commands it runs (ninja -C changes directories), for the commands that
+/// run without it.
+void SetPwdLikeShell() {
+  const char* pwd = getenv("PWD");
+  struct stat pwd_stat, cwd_stat;
+  if (pwd && pwd[0] == '/' && stat(pwd, &pwd_stat) == 0 &&
+      stat(".", &cwd_stat) == 0 && pwd_stat.st_dev == cwd_stat.st_dev &&
+      pwd_stat.st_ino == cwd_stat.st_ino)
+    return;
+  string cwd(256, '\0');
+  while (!getcwd(&cwd[0], cwd.size())) {
+    if (errno != ERANGE)
+      return;
+    cwd.resize(cwd.size() * 2);
+  }
+  setenv("PWD", cwd.c_str(), 1);
+}
+
+}  // anonymous namespace
 
 Subprocess::Subprocess(bool use_console) : fd_(-1), pid_(-1),
                                            use_console_(use_console) {
@@ -129,9 +233,25 @@ bool Subprocess::Start(SubprocessSet* set, const string& command) {
   if (err != 0)
     Fatal("posix_spawnattr_setflags: %s", strerror(err));
 
-  const char* spawned_args[] = { "/bin/sh", "-c", command.c_str(), NULL };
-  err = posix_spawn(&pid_, "/bin/sh", &action, &attr,
-        const_cast<char**>(spawned_args), environ);
+  // Simple commands are run directly, which saves starting a shell (that
+  // can take milliseconds).  If that fails (say, the program isn't there),
+  // the shell runs the command as usual and reports the problem.
+  err = -1;
+#ifdef NINJA_SPAWN_SIMPLE_COMMANDS
+  vector<string> words;
+  if (SplitSimpleCommand(command, &words)) {
+    vector<char*> args;
+    for (string& word : words)
+      args.push_back(&word[0]);
+    args.push_back(NULL);
+    err = posix_spawn(&pid_, args[0], &action, &attr, args.data(), environ);
+  }
+#endif
+  if (err != 0) {
+    const char* spawned_args[] = { "/bin/sh", "-c", command.c_str(), NULL };
+    err = posix_spawn(&pid_, "/bin/sh", &action, &attr,
+          const_cast<char**>(spawned_args), environ);
+  }
   if (err != 0)
     Fatal("posix_spawn: %s", strerror(err));
 
@@ -250,6 +370,8 @@ void SubprocessSet::HandlePendingInterruption() {
 }
 
 SubprocessSet::SubprocessSet() {
+  SetPwdLikeShell();
+
   // Block all these signals.
   // Their handlers will only be enabled during ppoll/pselect().
   sigset_t set;
