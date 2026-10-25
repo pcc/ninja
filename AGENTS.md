@@ -100,6 +100,15 @@ Machines used:
 - Leaf nodes loaded as deps don't get out-edges (flagged instead; dyndep
   recovers them if such a node gains an in-edge).
 
+## Pitfalls found so far
+
+- glibc grows heaps with an mprotect() per few pages; with many threads
+  allocating that serializes everything on the mmap lock (osq_lock in the
+  kernel profile). Hence M_TOP_PAD in main().
+- Worker threads must block signals (see thread_pool.cc).
+- The shell aliases cp/rm to -i: use `command cp`/`command rm -f`.
+- `pkill -f` patterns can match the shell running them.
+
 ## Results
 
 Median time to first command (ms), tree on tmpfs. Run-to-run noise is
@@ -123,6 +132,7 @@ don't compare exactly.
 | summarize leaf deps in prefetch|   215 |    139 |
 | load logs while parsing        |   180 |    127 |
 | concurrent node creation       |   175 |    113 |
+| mallopt(M_TOP_PAD, 64MB)       |   173 |     92 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

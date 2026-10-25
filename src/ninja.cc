@@ -14,6 +14,9 @@
 
 #include <errno.h>
 #include <limits.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2137,6 +2140,13 @@ NORETURN void real_main(int argc, char** argv) {
 }  // anonymous namespace
 
 int main(int argc, char** argv) {
+#ifdef __GLIBC__
+  // Ninja allocates a lot of memory on many threads at once when loading.
+  // By default, glibc grows the heaps a few pages at a time, each time with
+  // an mprotect() call, which takes the address space lock for writing
+  // and makes the threads (and their page faults) wait for each other.
+  mallopt(M_TOP_PAD, 64 << 20);
+#endif
 #if defined(_MSC_VER)
   // Set a handler to catch crashes not caught by the __try..__except
   // block (e.g. an exception in a stack-unwind-block).
