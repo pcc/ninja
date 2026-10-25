@@ -21,7 +21,7 @@ Changes the tree of bench.py in a few ways (a source or a header touched,
 an object missing, a command changed, the manifest cache or the build log
 missing or broken), and compares the output of 'ninja -n' (run twice for
 NINJA, so that its manifest cache is both missed and used).  Afterwards,
-the tree is restored and rebuilt with NINJA.
+the tree is restored and its build directories are rebuilt with NINJA.
 """
 
 import argparse
@@ -107,8 +107,10 @@ def main():
     shutil.move(log + '.moved', log)
     check('restored')
 
-    subprocess.run([ninja, '--quiet'], cwd=out_dir, stdout=subprocess.DEVNULL,
-                   check=True)
+    # The trees share their sources.
+    for build_dir in glob.glob(os.path.join(root, 'out', '*')):
+        subprocess.run([ninja, '--quiet'], cwd=build_dir,
+                       stdout=subprocess.DEVNULL, check=True)
     sys.exit(1 if failures else 0)
 
 
