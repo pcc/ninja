@@ -46,18 +46,17 @@ def build_tools(root: str) -> None:
                                os.path.join(HERE, t + '.c')])
 
 
-def full_build(root: str, ninja: str) -> None:
-    out = os.path.join(root, 'out/Default')
+def full_build(root: str, ninja: str, build_dir: str) -> None:
+    out = os.path.join(root, build_dir)
     for f in ['.ninja_log', '.ninja_deps']:
         if os.path.exists(os.path.join(out, f)):
             os.unlink(os.path.join(out, f))
-    for d in ['obj', 'gen']:
-        objs = os.path.join(out, d)
-        # Keep the subninjas under obj/, remove everything else.
-        for dirpath, _, files in os.walk(objs):
-            for f in files:
-                if not f.endswith('.ninja'):
-                    os.unlink(os.path.join(dirpath, f))
+    # Remove the outputs, keep the manifests and other inputs.
+    for dirpath, _, files in os.walk(out):
+        for f in files:
+            if f.endswith(('.o', '.a', '.d', '.rsp', '.stamp')) and \
+                    not f.startswith('build.ninja'):
+                os.unlink(os.path.join(dirpath, f))
     subprocess.check_call([ninja, '-C', out, '--quiet'])
     log = subprocess.check_output([ninja, '-C', out]).decode()
     if 'no work to do' not in log:
@@ -70,6 +69,9 @@ def main() -> None:
     parser.add_argument('--ninja', default='ninja')
     parser.add_argument('--targets', type=int, default=2000)
     parser.add_argument('-n', '--runs', type=int, default=10)
+    parser.add_argument('--build-dir', default='out/Default',
+                        help='out/Default (GN style) or out/CMake (CMake '
+                        'style)')
     parser.add_argument('dir')
     parser.add_argument('extra', nargs='*')
     args = parser.parse_args()
@@ -83,12 +85,13 @@ def main() -> None:
                                'gen_bench.py'), '--targets',
                                str(args.targets), root])
         build_tools(root)
-        full_build(root, ninja)
+        full_build(root, ninja, 'out/Default')
+        full_build(root, ninja, 'out/CMake')
     elif args.cmd == 'rebuild':
         build_tools(root)
-        full_build(root, ninja)
+        full_build(root, ninja, args.build_dir)
     else:
-        out = os.path.join(root, 'out/Default')
+        out = os.path.join(root, args.build_dir)
         touch = open(os.path.join(root, 'touch_file')).read().strip()
         sys.exit(subprocess.call(
             [os.path.join(root, 'tools/ttfc'), '-n', str(args.runs),
