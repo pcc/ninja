@@ -38,10 +38,13 @@ struct ThreadPool {
 
   size_t concurrency() const { return workers_ + 1; }
 
-  void Push(std::function<void()> task) {
+  void Push(std::function<void()> task, bool urgent = false) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      queue_.push_back(std::move(task));
+      if (urgent)
+        queue_.push_front(std::move(task));
+      else
+        queue_.push_back(std::move(task));
     }
     cond_.notify_one();
   }
@@ -96,13 +99,15 @@ struct ThreadPool {
 
 }  // anonymous namespace
 
-void TaskGroup::Run(std::function<void()> task) {
+void TaskGroup::Run(std::function<void()> task, bool urgent) {
   pending_.fetch_add(1, std::memory_order_relaxed);
-  ThreadPool::Get().Push([this, task = std::move(task)] {
-    task();
-    if (pending_.fetch_sub(1, std::memory_order_acq_rel) == 1)
-      ThreadPool::Get().NotifyAll();
-  });
+  ThreadPool::Get().Push(
+      [this, task = std::move(task)] {
+        task();
+        if (pending_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+          ThreadPool::Get().NotifyAll();
+      },
+      urgent);
 }
 
 void TaskGroup::Wait() {

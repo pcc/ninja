@@ -176,6 +176,8 @@ struct NinjaMain : public BuildLogUser {
     LoadStatus build_log_status = LOAD_ERROR;
     std::string build_log_err;
     DepsLog::PendingLoadPtr deps_log;
+    /// Whether deps_log_ was loaded already (LoadWithoutSideEffects()).
+    bool deps_log_loaded = false;
     /// Counts the steps done before nodes for the deps log can be created:
     /// reading it, and knowing that builddir is empty.
     std::atomic<int> deps_steps{0};
@@ -1588,10 +1590,15 @@ void NinjaMain::DepsLogStepDone() {
   if (logs->deps_steps.fetch_add(1, std::memory_order_acq_rel) != 1 ||
       !logs->builddir_empty)
     return;
-  logs->tasks.Run([this, logs] {
-    DepsLog::CreateNodes(logs->deps_log.get(), &state_);
-    DepsLog::StartEarlyStats(logs->deps_log.get(), &disk_interface_);
-  });
+  // This is on the way to the scan, unlike most of the parse.
+  logs->tasks.Run(
+      [this, logs] {
+        DepsLog::CreateNodes(logs->deps_log.get(), &state_);
+        DepsLog::StartEarlyStats(logs->deps_log.get(), &disk_interface_);
+        logs->deps_log_loaded =
+            deps_log_.LoadWithoutSideEffects(&logs->deps_log);
+      },
+      /*urgent=*/true);
 }
 
 bool NinjaMain::OpenBuildLog(bool recompact_only) {
@@ -1656,7 +1663,12 @@ bool NinjaMain::OpenDepsLog(bool recompact_only) {
   SpeculativeLogs* logs = speculative_logs_.get();
   if (logs && build_dir_.empty()) {
     logs->tasks.Wait();
-    status = deps_log_.Load(std::move(logs->deps_log), path, &state_, &err);
+    if (logs->deps_log_loaded) {
+      deps_log_.FinishLoadWithoutSideEffects();
+      status = LOAD_SUCCESS;
+    } else {
+      status = deps_log_.Load(std::move(logs->deps_log), path, &state_, &err);
+    }
   } else {
     status = deps_log_.Load(path, &state_, &err);
   }

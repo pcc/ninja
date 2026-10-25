@@ -458,6 +458,63 @@ LoadStatus DepsLog::Load(const string& path, State* state, string* err) {
   return Load(Read(path), path, state, err);
 }
 
+bool DepsLog::LoadWithoutSideEffects(PendingLoadPtr* pending_ptr) {
+  PendingLoad* pending = pending_ptr->get();
+  if (pending->load_errno || !pending->valid_header ||
+      pending->version != kCurrentVersion || pending->read_failed ||
+      pending->nodes.empty() || !nodes_.empty() || !deps_.empty())
+    return false;
+  int unique_dep_record_count = 0;
+  int total_dep_record_count = 0;
+  for (size_t i = 0; i < pending->records.size(); ++i) {
+    const PendingLoad::Record& record = pending->records[i];
+    if (record.is_deps) {
+      const int* deps_data = reinterpret_cast<const int*>(record.data);
+      int out_id = deps_data[0];
+      TimeStamp mtime =
+          (TimeStamp)(((uint64_t)(unsigned int)deps_data[2] << 32) |
+                      (uint64_t)(unsigned int)deps_data[1]);
+      Deps* deps = new Deps(mtime, (record.size / 4) - 3, deps_data + 3,
+                            &nodes_);
+      total_dep_record_count++;
+      if (!UpdateDeps(out_id, deps))
+        ++unique_dep_record_count;
+    } else {
+      Node* node = pending->nodes[i];
+      if (node->id() >= 0) {
+        // A path appears twice: let Load() deal with that.  Undo.
+        for (Node* n : nodes_)
+          n->set_id(-1);
+        nodes_.clear();
+        for (Deps* deps : deps_)
+          delete deps;
+        deps_.clear();
+        return false;
+      }
+      node->set_id(static_cast<int>(nodes_.size()));
+      nodes_.push_back(node);
+    }
+  }
+  loaded_files_.push_back(std::move(pending->file));
+  early_stats_ = std::move(pending->early_stats);
+  pending_ptr->reset();
+
+  // Rebuild the log if there are too many dead records.
+  int kMinCompactionEntryCount = 1000;
+  int kCompactionRatio = 3;
+  if (total_dep_record_count > kMinCompactionEntryCount &&
+      total_dep_record_count > unique_dep_record_count * kCompactionRatio) {
+    needs_recompaction_ = true;
+  }
+  return true;
+}
+
+void DepsLog::FinishLoadWithoutSideEffects() {
+  // As in Load().
+  for (Node* node : nodes_)
+    node->set_slash_bits_provisional(false);
+}
+
 LoadStatus DepsLog::Load(PendingLoadPtr pending, const string& path,
                          State* state, string* err) {
   METRIC_RECORD(".ninja_deps load");

@@ -31,8 +31,9 @@ struct TaskGroup {
   TaskGroup& operator=(const TaskGroup&) = delete;
   ~TaskGroup() { Wait(); }
 
-  /// Queue \a task for execution on some thread.
-  void Run(std::function<void()> task);
+  /// Queue \a task for execution on some thread.  Urgent tasks go before
+  /// the other queued tasks.
+  void Run(std::function<void()> task, bool urgent = false);
 
   /// Wait for all tasks in the group, including tasks added by tasks, to
   /// finish.

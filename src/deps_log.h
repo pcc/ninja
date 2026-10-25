@@ -118,6 +118,16 @@ struct DepsLog {
   static void StartEarlyStats(PendingLoad* pending,
                               const DiskInterface* disk_interface);
 
+  /// Like Load(), after CreateNodes(), but only if that has no side effects
+  /// (as when the log is corrupt), so that it can run while the manifest
+  /// is parsed.  Otherwise, return false (leaving \a pending as it was) to
+  /// Load() later as usual.
+  bool LoadWithoutSideEffects(PendingLoadPtr* pending);
+
+  /// To be called after the manifest is parsed, after
+  /// LoadWithoutSideEffects().
+  void FinishLoadWithoutSideEffects();
+
   /// Return the mtime that the early stat() of the node with the given id
   /// returned (waiting for it if needed), or -1 if there is none (then
   /// stat() it as usual).  Must be called at most once per id.
