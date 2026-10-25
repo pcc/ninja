@@ -510,8 +510,11 @@ void DependencyScan::Prefetch(Node* initial_node) {
                   build_log_->LookupByOutput(output->path())) {
             if (output == edge->outputs_[0])
               b.first_output_log_entry = entry;
-            b.command_hash = BuildLog::LogEntry::HashCommand(
-                edge->EvaluateCommand(/*incl_rsp_file=*/true));
+            // Reuse the memory for the commands.
+            thread_local std::string command;
+            command.clear();
+            edge->EvaluateCommandInto(&command, /*incl_rsp_file=*/true);
+            b.command_hash = BuildLog::LogEntry::HashCommand(command);
             b.command_hash_valid = true;
             break;
           }
@@ -1008,18 +1011,23 @@ void EdgeEnv::AppendPathList(const Node* const* const span, const size_t size,
 
 std::string Edge::EvaluateCommand(const bool incl_rsp_file) const {
   string command;
-  EdgeEnv env(this, EdgeEnv::kShellEscape);
-  env.AppendVariable("command", &command);
-  if (incl_rsp_file) {
-    size_t command_size = command.size();
-    command += ";rspfile=";
-    size_t prefix_size = command.size();
-    EdgeEnv rsp_env(this, EdgeEnv::kShellEscape);
-    rsp_env.AppendVariable("rspfile_content", &command);
-    if (command.size() == prefix_size)
-      command.resize(command_size);
-  }
+  EvaluateCommandInto(&command, incl_rsp_file);
   return command;
+}
+
+void Edge::EvaluateCommandInto(std::string* command,
+                               const bool incl_rsp_file) const {
+  EdgeEnv env(this, EdgeEnv::kShellEscape);
+  env.AppendVariable("command", command);
+  if (incl_rsp_file) {
+    size_t command_size = command->size();
+    command->append(";rspfile=");
+    size_t prefix_size = command->size();
+    EdgeEnv rsp_env(this, EdgeEnv::kShellEscape);
+    rsp_env.AppendVariable("rspfile_content", command);
+    if (command->size() == prefix_size)
+      command->resize(command_size);
+  }
 }
 
 std::string Edge::GetBinding(StringPiece key) const {

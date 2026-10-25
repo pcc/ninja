@@ -245,6 +245,8 @@ struct Edge {
   /// If incl_rsp_file is enabled, the string will also contain the
   /// full contents of a response file (if applicable)
   std::string EvaluateCommand(bool incl_rsp_file = false) const;
+  /// Like EvaluateCommand(), but appends the command to \a command.
+  void EvaluateCommandInto(std::string* command, bool incl_rsp_file) const;
 
   /// Returns the shell-escaped value of |key|.
   std::string GetBinding(StringPiece key) const;

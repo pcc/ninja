@@ -172,6 +172,7 @@ don't compare exactly.
 | (chunks, mapped manifests)     |   121 |     72 |
 | bindings as views, flat envs   |   115 |     70 |
 | canonical paths not copied     |   111 |     69 |
+| (small cleanups: log entries, name masks, command buffer) |   111 |     67 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):
@@ -183,6 +184,7 @@ graph):
 | process big files in chunks    |   225 |    185 |
 | map big manifests, no copies   |   108 |     82 |
 | bindings as views, flat envs   |   101 |     73 |
+| (small cleanups since)         |    76 |     69 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat
