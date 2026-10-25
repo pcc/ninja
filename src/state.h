@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "disk_interface.h"
 #include "eval_env.h"
 #include "graph.h"
 #include "hash_map.h"
@@ -209,6 +210,9 @@ struct State {
 
   BindingEnv bindings_;
   std::vector<Node*> defaults_;
+
+  /// The contents of the manifest files, which bindings point into.
+  std::vector<std::unique_ptr<FileContents> > manifest_contents_;
 };
 
 #endif  // NINJA_STATE_H_

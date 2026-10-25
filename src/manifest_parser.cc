@@ -706,8 +706,9 @@ struct PendingDefault {
 /// A manifest file being processed, with the effects to apply to the State.
 struct ParsedFile {
   std::string filename;
-  /// The contents of the file, NUL-terminated and padded.
-  FileContents contents;
+  /// The contents of the file, NUL-terminated and padded.  Bindings point
+  /// into them, so they end up in the State.
+  std::unique_ptr<FileContents> contents{new FileContents};
   /// The text of the file: input.data(), or the text of the file that this
   /// is a chunk of.
   const char* text = nullptr;
@@ -841,7 +842,7 @@ bool LoadAndProcessFile(ParseContext* ctx, ParsedFile* parent,
                         bool frozen) {
   std::string read_err;
   if (ctx->file_reader->LoadFile(file->filename, kCharScanPadding + 1,
-                                 &file->contents,
+                                 file->contents.get(),
                                  &read_err) != FileReader::Okay) {
     // Errors loading the file are reported in the context of the parent.
     file->AddError(FormatError(parent->filename, parent->text, pos,
@@ -965,8 +966,8 @@ bool ProcessFile(ParseContext* ctx, ParsedFile* file, BindingEnv* env,
                  bool frozen) {
   if (!file->text) {
     // FileReader::LoadFile() padded the contents for the lexer.
-    file->text = file->contents.data;
-    file->size = file->contents.size;
+    file->text = file->contents->data;
+    file->size = file->contents->size;
   }
   FileProcessor processor(ctx, file, env, frozen);
   bool ok = processor.Run();
@@ -1021,7 +1022,12 @@ bool FileProcessor::Run() {
             { Item::kVersion, file_->strings.size(), nullptr });
         file_->strings.push_back(value);
       }
-      env_->AddBinding(name.AsString(), value);
+      // The manifest's text is kept as long as the State.
+      env_->AddBindingView(name, let_value.literal
+                                     ? StringPiece(let_value.begin,
+                                                   let_value.end -
+                                                       let_value.begin)
+                                     : env_->Keep(std::move(value)));
       break;
     }
     case Lex::INCLUDE:
@@ -1419,7 +1425,11 @@ bool FileProcessor::ParseEdge(std::string* err) {
     if (!ok)
       return false;
 
-    env->AddBinding(key.AsString(), Evaluate(val, env_));
+    // The manifest's text is kept as long as the State.
+    if (val.literal)
+      env->AddBindingView(key, StringPiece(val.begin, val.end - val.begin));
+    else
+      env->AddBindingView(key, env->Keep(Evaluate(val, env_)));
     has_indent_token = lexer_.PeekToken(Lex::INDENT);
   }
 
@@ -1769,7 +1779,8 @@ bool ManifestParser::Load(const string& filename, string* err) {
   std::unique_ptr<ParsedFile> root(new ParsedFile);
   root->filename = filename;
   string read_err;
-  if (file_reader_->LoadFile(filename, kCharScanPadding + 1, &root->contents,
+  if (file_reader_->LoadFile(filename, kCharScanPadding + 1,
+                             root->contents.get(),
                              &read_err) != FileReader::Okay) {
     *err = "loading '" + filename + "': " + read_err;
     return false;
@@ -1787,10 +1798,11 @@ bool ManifestParser::ParseContents(const string& filename, string* contents,
                                    string* err) {
   std::unique_ptr<ParsedFile> root(new ParsedFile);
   root->filename = filename;
-  root->contents.storage.swap(*contents);
-  root->contents.size = root->contents.storage.size();
-  root->contents.storage.append(kCharScanPadding + 1, '\0');
-  root->contents.data = root->contents.storage.data();
+  FileContents* c = root->contents.get();
+  c->storage.swap(*contents);
+  c->size = c->storage.size();
+  c->storage.append(kCharScanPadding + 1, '\0');
+  c->data = c->storage.data();
   return ParseRoot(root.release(), err);
 }
 
@@ -1810,10 +1822,21 @@ bool ManifestParser::ParseRoot(void* root_file, string* err) {
   bool ok = merger.Merge(root.get(), err);
   // On errors, there may still be files being processed.
   ctx.tasks.Wait();
+  // Bindings point into the files' contents.
+  std::vector<ParsedFile*> files(1, root.get());
+  while (!files.empty()) {
+    ParsedFile* file = files.back();
+    files.pop_back();
+    if (file->contents->data)
+      state_->manifest_contents_.push_back(std::move(file->contents));
+    for (Item& item : file->items)
+      if (item.file)
+        files.push_back(item.file.get());
+  }
   // Freeing all that takes a while.
   if (ctx.parallel) {
-    ParsedFile* files = root.release();
-    RunDetached([files] { delete files; });
+    ParsedFile* released = root.release();
+    RunDetached([released] { delete released; });
   }
   return ok;
 }

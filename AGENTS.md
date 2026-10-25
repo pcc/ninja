@@ -113,6 +113,10 @@ Machines used:
   tasks interleave). Results stay in per-id arrays; Prefetch() applies them
   (DepsLog::TakeEarlyStat). RebuildManifest() forgets them before running
   any command.
+- `BindingEnv` stores bindings as (key, value) StringPieces in a small
+  vector (indexed once there are more than 16); the parser adds literal
+  values as views into the manifest text, which `State::manifest_contents_`
+  keeps alive. Rules have a hash index (CMake has two rules per target).
 - Leaf nodes loaded as deps don't get out-edges (flagged instead; dyndep
   recovers them if such a node gains an in-edge).
 
@@ -161,6 +165,8 @@ don't compare exactly.
 | faster $in lists (SIMD escape) |   161 |     81 |
 | stat deps-log nodes while parsing |   118 |     74 |
 | load deps log while parsing    |   118 |     71 |
+| (chunks, mapped manifests)     |   121 |     72 |
+| bindings as views, flat envs   |   115 |     70 |
 
 CMake-style build (`--build-dir out/CMake`: one 125 MB build.ninja, same
 graph):
@@ -171,6 +177,7 @@ graph):
 | (all of the above)             |   315 |    284 |
 | process big files in chunks    |   225 |    185 |
 | map big manifests, no copies   |   108 |     82 |
+| bindings as views, flat envs   |   101 |     73 |
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat

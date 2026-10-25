@@ -18,47 +18,82 @@
 
 using namespace std;
 
+const StringPiece* BindingEnv::Find(StringPiece var) const {
+  if (index_) {
+    auto i = index_->find(var);
+    return i != index_->end() ? &bindings_[i->second].second : NULL;
+  }
+  for (const auto& binding : bindings_) {
+    if (binding.first == var)
+      return &binding.second;
+  }
+  return NULL;
+}
+
 std::string BindingEnv::LookupVariable(StringPiece var) {
-  const auto i = bindings_.find(var);
-  if (i != bindings_.end())
-    return i->second;
-  if (parent_)
-    return parent_->LookupVariable(var);
+  for (BindingEnv* env = this; env; env = env->parent_) {
+    if (const StringPiece* value = env->Find(var))
+      return value->AsString();
+  }
   return "";
 }
 
 void BindingEnv::AppendVariable(StringPiece var, std::string* out) {
   for (BindingEnv* env = this; env; env = env->parent_) {
-    const auto i = env->bindings_.find(var);
-    if (i != env->bindings_.end()) {
-      out->append(i->second);
+    if (const StringPiece* value = env->Find(var)) {
+      out->append(value->str_, value->len_);
       return;
     }
   }
 }
 
 void BindingEnv::AddBinding(const std::string& key, StringPiece val) {
-  bindings_[key].assign(val.begin(), val.end());
+  storage_.emplace_back(new std::string(key));
+  StringPiece key_view = *storage_.back();
+  storage_.emplace_back(new std::string(val.str_, val.len_));
+  AddBindingView(key_view, *storage_.back());
+}
+
+StringPiece BindingEnv::Keep(std::string value) {
+  storage_.emplace_back(new std::string(std::move(value)));
+  return *storage_.back();
+}
+
+void BindingEnv::AddBindingView(StringPiece key, StringPiece val) {
+  if (StringPiece* value = const_cast<StringPiece*>(Find(key))) {
+    *value = val;
+    return;
+  }
+  bindings_.emplace_back(key, val);
+  const size_t kMaxUnindexed = 16;
+  if (index_) {
+    index_->emplace(key, bindings_.size() - 1);
+  } else if (bindings_.size() > kMaxUnindexed) {
+    index_.reset(new std::unordered_map<StringPiece, size_t>);
+    for (size_t i = 0; i < bindings_.size(); ++i)
+      index_->emplace(bindings_[i].first, i);
+  }
 }
 
 void BindingEnv::AddRule(std::unique_ptr<const Rule> rule) {
   assert(LookupRuleCurrentScope(rule->name()) == NULL);
+  const Rule* r = rule.get();
   rules_[rule->name()] = std::move(rule);
+  rule_index_[r->name()] = r;
 }
 
 const Rule* BindingEnv::LookupRuleCurrentScope(StringPiece rule_name) {
-  auto i = rules_.find(rule_name);
-  if (i == rules_.end())
+  auto i = rule_index_.find(rule_name);
+  if (i == rule_index_.end())
     return NULL;
-  return i->second.get();
+  return i->second;
 }
 
 const Rule* BindingEnv::LookupRule(StringPiece rule_name) {
-  auto i = rules_.find(rule_name);
-  if (i != rules_.end())
-    return i->second.get();
-  if (parent_)
-    return parent_->LookupRule(rule_name);
+  for (BindingEnv* env = this; env; env = env->parent_) {
+    if (const Rule* rule = env->LookupRuleCurrentScope(rule_name))
+      return rule;
+  }
   return NULL;
 }
 
@@ -105,9 +140,8 @@ const map<string, std::unique_ptr<const Rule>, StringPieceLess>& BindingEnv::Get
 std::string BindingEnv::LookupWithFallback(StringPiece var,
                                            const EvalString* eval,
                                            Env* env) {
-  const auto i = bindings_.find(var);
-  if (i != bindings_.end())
-    return i->second;
+  if (const StringPiece* value = Find(var))
+    return value->AsString();
 
   if (eval)
     return eval->Evaluate(env);
@@ -120,9 +154,8 @@ std::string BindingEnv::LookupWithFallback(StringPiece var,
 
 void BindingEnv::AppendWithFallback(StringPiece var, const EvalString* eval,
                                     Env* env, std::string* out) {
-  const auto i = bindings_.find(var);
-  if (i != bindings_.end()) {
-    out->append(i->second);
+  if (const StringPiece* value = Find(var)) {
+    out->append(value->str_, value->len_);
     return;
   }
 

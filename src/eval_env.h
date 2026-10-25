@@ -18,8 +18,10 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
+#include "hash_map.h"
 #include "string_piece.h"
 #include "string_piece_util.h"
 
@@ -117,6 +119,13 @@ struct BindingEnv : public Env {
 
   void AddBinding(const std::string& key, StringPiece val);
 
+  /// Like AddBinding(), but without copying \a key and \a val, which must
+  /// stay valid as long as the BindingEnv.
+  void AddBindingView(StringPiece key, StringPiece val);
+
+  /// Keep \a value as long as the BindingEnv, for AddBindingView().
+  StringPiece Keep(std::string value);
+
   /// This is tricky.  Edges want lookup scope to go in this order:
   /// 1) value set on edge itself (edge_->env_)
   /// 2) value set on rule, with expansion in the edge's scope
@@ -129,8 +138,19 @@ struct BindingEnv : public Env {
                           std::string* out);
 
 private:
-  std::map<std::string, std::string, StringPieceLess> bindings_;
+  /// Return the value of the binding for \a var in this scope, or null.
+  const StringPiece* Find(StringPiece var) const;
+
+  /// The bindings: few, usually, so they are in a vector.
+  std::vector<std::pair<StringPiece, StringPiece> > bindings_;
+  /// An index of bindings_, once there are many.
+  std::unique_ptr<std::unordered_map<StringPiece, size_t> > index_;
+  /// Storage for the keys and values that are not views.
+  std::vector<std::unique_ptr<std::string> > storage_;
+
   std::map<std::string, std::unique_ptr<const Rule>, StringPieceLess> rules_;
+  /// An index of rules_, for faster lookups.
+  std::unordered_map<StringPiece, const Rule*> rule_index_;
   BindingEnv* parent_;
 };
 
