@@ -36,6 +36,7 @@
 #include "build.h"
 #include "graph.h"
 #include "metrics.h"
+#include "thread_pool.h"
 #include "util.h"
 #if defined(_MSC_VER) && (_MSC_VER < 1800)
 #define strtoll _strtoi64
@@ -154,162 +155,202 @@ bool BuildLog::OpenForWriteIfNeeded() {
   return true;
 }
 
-struct LineReader {
-  explicit LineReader(FILE* file)
-    : file_(file), buf_end_(buf_), line_start_(buf_), line_end_(NULL) {
-      memset(buf_, 0, sizeof(buf_));
+namespace {
+
+/// Lines at least this long are ignored (they used to not fit in a buffer).
+const size_t kMaxLineSize = 256 << 10;
+
+/// Parse a decimal integer the way strtoll() does, quickly in the usual
+/// case.
+int64_t ParseDecimal(const char* begin, const char* end) {
+  const char* p = begin;
+  bool negative = p != end && *p == '-';
+  p += negative;
+  uint64_t value = 0;
+  if (end - p <= 18) {
+    for (; p != end && *p >= '0' && *p <= '9'; ++p)
+      value = value * 10 + (*p - '0');
   }
+  if (p == end)
+    return negative ? -static_cast<int64_t>(value) : value;
+  std::string copy(begin, end);
+  return strtoll(copy.c_str(), NULL, 10);
+}
 
-  // Reads a \n-terminated line from the file passed to the constructor.
-  // On return, *line_start points to the beginning of the next line, and
-  // *line_end points to the \n at the end of the line. If no newline is seen
-  // in a fixed buffer size, *line_end is set to NULL. Returns false on EOF.
-  bool ReadLine(char** line_start, char** line_end) {
-    if (line_start_ >= buf_end_ || !line_end_) {
-      // Buffer empty, refill.
-      size_t size_read = fread(buf_, 1, sizeof(buf_), file_);
-      if (!size_read)
-        return false;
-      line_start_ = buf_;
-      buf_end_ = buf_ + size_read;
-    } else {
-      // Advance to next line in buffer.
-      line_start_ = line_end_ + 1;
+/// Parse a hexadecimal integer the way strtoull() does, quickly in the
+/// usual case.
+uint64_t ParseHex(const char* begin, const char* end) {
+  const char* p = begin;
+  uint64_t value = 0;
+  if (end - p <= 16) {
+    for (; p != end; ++p) {
+      char c = *p;
+      int digit;
+      if (c >= '0' && c <= '9')
+        digit = c - '0';
+      else if (c >= 'a' && c <= 'f')
+        digit = c - 'a' + 10;
+      else if (c >= 'A' && c <= 'F')
+        digit = c - 'A' + 10;
+      else
+        break;
+      value = value * 16 + digit;
     }
-
-    line_end_ = static_cast<char*>(memchr(line_start_, '\n', buf_end_ - line_start_));
-    if (!line_end_) {
-      // No newline. Move rest of data to start of buffer, fill rest.
-      size_t already_consumed = line_start_ - buf_;
-      size_t size_rest = (buf_end_ - buf_) - already_consumed;
-      memmove(buf_, line_start_, size_rest);
-
-      size_t read = fread(buf_ + size_rest, 1, sizeof(buf_) - size_rest, file_);
-      buf_end_ = buf_ + size_rest + read;
-      line_start_ = buf_;
-      line_end_ = static_cast<char*>(memchr(line_start_, '\n', buf_end_ - line_start_));
-    }
-
-    *line_start = line_start_;
-    *line_end = line_end_;
-    return true;
   }
+  if (p == end && p != begin)
+    return value;
+  std::string copy(begin, end);
+  return strtoull(copy.c_str(), NULL, 16);
+}
 
- private:
-  FILE* file_;
-  char buf_[256 << 10];
-  char* buf_end_;  // Points one past the last valid byte in |buf_|.
-
-  char* line_start_;
-  // Points at the next \n in buf_ after line_start, or NULL.
-  char* line_end_;
+/// An entry of the log, as parsed.
+struct ParsedEntry {
+  StringPiece output;
+  int start_time;
+  int end_time;
+  TimeStamp mtime;
+  uint64_t command_hash;
 };
+
+/// Parse the complete lines in [\a p, \a end).
+void ParseLines(const char* p, const char* end,
+                std::vector<ParsedEntry>* entries) {
+  const char kFieldSeparator = '\t';
+  while (p < end) {
+    const char* line_end =
+        static_cast<const char*>(memchr(p, '\n', end - p));
+    if (!line_end)
+      break;
+    const char* start = p;
+    p = line_end + 1;
+    if (static_cast<size_t>(line_end - start) >= kMaxLineSize)
+      continue;
+
+    const char* fields[4];
+    for (int i = 0; i < 4; ++i) {
+      const char* field_end = static_cast<const char*>(
+          memchr(start, kFieldSeparator, line_end - start));
+      if (!field_end)
+        break;
+      fields[i] = start;
+      start = field_end + 1;
+      if (i == 3) {
+        ParsedEntry entry;
+        entry.start_time = static_cast<int>(ParseDecimal(fields[0],
+                                                         fields[1] - 1));
+        entry.end_time = static_cast<int>(ParseDecimal(fields[1],
+                                                       fields[2] - 1));
+        entry.mtime = ParseDecimal(fields[2], fields[3] - 1);
+        entry.output = StringPiece(fields[3], field_end - fields[3]);
+        entry.command_hash = ParseHex(start, line_end);
+        entries->push_back(entry);
+      }
+    }
+  }
+}
+
+}  // namespace
 
 LoadStatus BuildLog::Load(const std::string& path, std::string* err,
                           bool may_modify) {
   METRIC_RECORD(".ninja_log load");
-  FILE* file = fopen(path.c_str(), "r");
-  if (!file) {
-    if (errno == ENOENT)
-      return LOAD_NOT_FOUND;
-    *err = strerror(errno);
+  RealDiskInterface disk;
+  FileContents contents;
+  switch (disk.LoadFile(path, 0, &contents, err)) {
+  case FileReader::Okay:
+    break;
+  case FileReader::NotFound:
+    err->clear();
+    return LOAD_NOT_FOUND;
+  default:
+    // A file that can be opened but not read (a directory) reads as empty.
+    if (FILE* file = fopen(path.c_str(), "r")) {
+      fclose(file);
+      err->clear();
+      return LOAD_SUCCESS;
+    }
     return LOAD_ERROR;
   }
+  if (contents.size == 0)
+    return LOAD_SUCCESS;  // file was empty
+  const char* data = contents.data;
+  const char* end = data + contents.size;
 
   int log_version = 0;
+  const char* first_line_end =
+      static_cast<const char*>(memchr(data, '\n', end - data));
+  std::string first_line(data, std::min<size_t>(
+      (first_line_end ? first_line_end + 1 : end) - data, 64));
+  sscanf(first_line.c_str(), kFileSignature, &log_version);
+  bool invalid_log_version = false;
+  if (log_version < kOldestSupportedVersion) {
+    invalid_log_version = true;
+    *err = "build log version is too old; starting over";
+  } else if (log_version > kCurrentVersion) {
+    invalid_log_version = true;
+    *err = "build log version is too new; starting over";
+  }
+  if (invalid_log_version) {
+    if (!may_modify)
+      return LOAD_ERROR;
+    platformAwareUnlink(path.c_str());
+    // Don't report this as a failure. A missing build log will cause
+    // us to rebuild the outputs anyway.
+    return LOAD_NOT_FOUND;
+  }
+
+  // Parse chunks of lines in parallel.
+  const size_t kMinChunkSize = 64 << 10;
+  size_t chunk_count = std::min<size_t>(TaskGroup::Concurrency() * 2,
+                                        contents.size / kMinChunkSize + 1);
+  // Chunks end after a newline.
+  std::vector<const char*> bounds(chunk_count + 1, end);
+  bounds[0] = data;
+  for (size_t i = 1; i < chunk_count; ++i) {
+    const char* p =
+        std::max(bounds[i - 1], data + contents.size * i / chunk_count);
+    const char* line_end =
+        static_cast<const char*>(memchr(p, '\n', end - p));
+    bounds[i] = line_end ? line_end + 1 : end;
+  }
+  std::vector<std::vector<ParsedEntry> > parsed(chunk_count);
+  std::vector<std::vector<LogEntry*> > created(chunk_count);
+  ParallelFor(chunk_count, 1, [&](size_t from, size_t to) {
+    for (size_t i = from; i < to; ++i) {
+      ParseLines(bounds[i], bounds[i + 1], &parsed[i]);
+      created[i].reserve(parsed[i].size());
+      for (const ParsedEntry& entry : parsed[i]) {
+        created[i].push_back(new LogEntry(entry.output.AsString(),
+                                          entry.command_hash,
+                                          entry.start_time, entry.end_time,
+                                          entry.mtime));
+      }
+    }
+  });
+
+  // Later entries for an output replace earlier ones.
   int unique_entry_count = 0;
   int total_entry_count = 0;
-
-  LineReader reader(file);
-  char* line_start = 0;
-  char* line_end = 0;
-  while (reader.ReadLine(&line_start, &line_end)) {
-    if (!log_version) {
-      sscanf(line_start, kFileSignature, &log_version);
-
-      bool invalid_log_version = false;
-      if (log_version < kOldestSupportedVersion) {
-        invalid_log_version = true;
-        *err = "build log version is too old; starting over";
-
-      } else if (log_version > kCurrentVersion) {
-        invalid_log_version = true;
-        *err = "build log version is too new; starting over";
-      }
-      if (invalid_log_version) {
-        fclose(file);
-        if (!may_modify)
-          return LOAD_ERROR;
-        platformAwareUnlink(path.c_str());
-        // Don't report this as a failure. A missing build log will cause
-        // us to rebuild the outputs anyway.
-        return LOAD_NOT_FOUND;
+  size_t size = 0;
+  for (const auto& chunk : created)
+    size += chunk.size();
+  entries_.reserve(static_cast<Entries::size_type>(entries_.size() + size));
+  for (const auto& chunk : created) {
+    for (LogEntry* entry : chunk) {
+      ++total_entry_count;
+      // The map only takes the entry if it's new.
+      std::unique_ptr<LogEntry> owned(entry);
+      auto inserted = entries_.emplace(entry->output, std::move(owned));
+      if (inserted.second) {
+        ++unique_entry_count;
+      } else {
+        LogEntry* old = inserted.first->second.get();
+        old->start_time = entry->start_time;
+        old->end_time = entry->end_time;
+        old->mtime = entry->mtime;
+        old->command_hash = entry->command_hash;
       }
     }
-
-    // If no newline was found in this chunk, read the next.
-    if (!line_end)
-      continue;
-
-    const char kFieldSeparator = '\t';
-
-    char* start = line_start;
-    char* end = static_cast<char*>(memchr(start, kFieldSeparator, line_end - start));
-    if (!end)
-      continue;
-    *end = 0;
-
-    int start_time = 0, end_time = 0;
-    TimeStamp mtime = 0;
-
-    start_time = atoi(start);
-    start = end + 1;
-
-    end = static_cast<char*>(memchr(start, kFieldSeparator, line_end - start));
-    if (!end)
-      continue;
-    *end = 0;
-    end_time = atoi(start);
-    start = end + 1;
-
-    end = static_cast<char*>(memchr(start, kFieldSeparator, line_end - start));
-    if (!end)
-      continue;
-    *end = 0;
-    mtime = strtoll(start, NULL, 10);
-    start = end + 1;
-
-    end = static_cast<char*>(memchr(start, kFieldSeparator, line_end - start));
-    if (!end)
-      continue;
-    std::string output(start, end - start);
-
-    start = end + 1;
-    end = line_end;
-
-    LogEntry* entry;
-    Entries::iterator i = entries_.find(output);
-    if (i != entries_.end()) {
-      entry = i->second.get();
-    } else {
-      entry = new LogEntry(std::move(output));
-      // Passes ownership of |entry| to the map, but keeps the pointer valid.
-      entries_.emplace(entry->output, std::unique_ptr<LogEntry>(entry));
-      ++unique_entry_count;
-    }
-    ++total_entry_count;
-
-    entry->start_time = start_time;
-    entry->end_time = end_time;
-    entry->mtime = mtime;
-    char c = *end; *end = '\0';
-    entry->command_hash = (uint64_t)strtoull(start, NULL, 16);
-    *end = c;
-  }
-  fclose(file);
-
-  if (!line_start) {
-    return LOAD_SUCCESS; // file was empty
   }
 
   // Decide whether it's time to rebuild the log:
