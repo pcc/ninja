@@ -334,6 +334,7 @@ moved by 40% between runs on x64):
 | NEON with MSVC (arm64)         | 1896 -> 524 | 1948 -> 465 | 1738 -> 385 | 1809 -> 354 |
 | manifest cache on Windows      | 1571 -> 270 | 1594 -> 248 | 1774 -> 300 | 1831 -> 273 |
 | faster stat cache lookups, cache freed on another thread, deps log read directly, many depfile deps stat()ed in parallel | 1529 -> 213 | 1612 -> 188 | 1729 -> 240 | 1804 -> 201 |
+| cheaper directory listings (slower runners that day) | 1824 -> 251 | 2028 -> 230 | 1965 -> 259 | 2049 -> 209 |
 
 Before the stat cache change, the early stats bypassed the cache with a
 GetFileAttributesEx() per file; and char_scan.h didn't recognize
