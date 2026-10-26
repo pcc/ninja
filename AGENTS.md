@@ -110,8 +110,12 @@ Machines used:
   without in-edges (dirty?, newest mtime) in `Edge::scan_deps_`; the
   serial scan uses that and only adds the deps to `inputs_` if the edge
   ends up not ready (`Edge::deps_pending_`). Summaries are invalidated
-  when dyndep files are loaded (`dyndep_epoch_`).
-- `.ninja_deps` is mmap()ed (read on Windows); `DepsLog::Deps::nodes` is
+  when dyndep files are loaded (`dyndep_epoch_`). The serial scan stat()s
+  the deps it loads in parallel first when there are many
+  (`StatManyInParallel`: GN's depfile of build.ninja lists every
+  BUILD.gn).
+- `.ninja_deps` is mmap()ed (read into one buffer on Windows, where a
+  mapped file couldn't be replaced by recompaction); `DepsLog::Deps::nodes` is
   a view mapping the ids stored in the file through the log's id->Node
   table, so loading doesn't allocate or convert per dependency.
 - The logs are loaded while the manifest is parsed (NinjaMain::
@@ -150,10 +154,13 @@ Machines used:
 - On Windows, Stat() uses ninja's stat cache (one FindFirstFileEx()
   listing per directory, `-d nostatcache` turns it off) from the start
   (with the directory handles), and it's thread-safe (a directory is
-  listed by the first thread that needs it), so the early stats and the
-  prefetch use it too. (Before, the early stats did a
-  GetFileAttributesEx() per file, which presumably costs much more than
-  a stat() on Linux: the Windows runs were slow, most of all on arm64.)
+  listed by the first thread that needs it; 64 shards with a lock each;
+  no allocations per lookup), so the early stats and the prefetch use it
+  too. It's freed on another thread. On GitHub's runners a
+  GetFileAttributesEx() costs ~16 us (x64) / ~58 us (arm64), a
+  directory listing about as much: `-d nostatcache` takes 0.7 / 2.1 s.
+- `NINJA_TIMELINE` (only on the `win-timeline` branch, with the
+  workflow there): times of the phases since the process was created.
 - `BindingEnv` stores bindings as (key, value) StringPieces in a small
   vector (indexed once there are more than 16); the parser adds literal
   values as views into the manifest text, which `State::manifest_contents_`
@@ -325,7 +332,8 @@ moved by 40% between runs on x64):
 | (all of the above)             | 1175 -> 1024 | 1275 -> 1009 | 1749 -> 2852 | 1790 -> 2820 |
 | thread-safe stat cache         | 1343 -> 356 | 1431 -> 333 | 1812 -> 410 | 1938 -> 404 |
 | NEON with MSVC (arm64)         | 1896 -> 524 | 1948 -> 465 | 1738 -> 385 | 1809 -> 354 |
-| manifest cache on Windows      |        |           |          |             |
+| manifest cache on Windows      | 1571 -> 270 | 1594 -> 248 | 1774 -> 300 | 1831 -> 273 |
+| faster stat cache lookups, cache freed on another thread, deps log read directly, many depfile deps stat()ed in parallel | | | | |
 
 Before the stat cache change, the early stats bypassed the cache with a
 GetFileAttributesEx() per file; and char_scan.h didn't recognize
