@@ -27,9 +27,12 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#elif defined(_MSC_VER) && (_MSC_VER < 1900)
+#else
+#include <windows.h>
+#if defined(_MSC_VER) && (_MSC_VER < 1900)
 typedef __int32 int32_t;
 typedef unsigned __int32 uint32_t;
+#endif
 #endif
 
 #include "disk_interface.h"
@@ -85,7 +88,6 @@ struct DepsLog::LoadedFile {
       }
     }
     close(fd);
-#endif
     FILE* f = fopen(path.c_str(), "rb");
     if (!f)
       return false;
@@ -101,6 +103,48 @@ struct DepsLog::LoadedFile {
     data_ = reinterpret_cast<const char*>(buffer_.get());
     size_ = contents.size();
     return true;
+#else
+    // Read the file into the buffer directly: going through stdio copies
+    // it a few times, which takes long for big logs.
+    HANDLE f = CreateFileA(path.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+      DWORD win_err = GetLastError();
+      errno = win_err == ERROR_FILE_NOT_FOUND || win_err == ERROR_PATH_NOT_FOUND
+                  ? ENOENT
+                  : EIO;
+      return false;
+    }
+    LARGE_INTEGER file_size;
+    if (!GetFileSizeEx(f, &file_size)) {
+      CloseHandle(f);
+      errno = EIO;
+      return false;
+    }
+    // Keep the data 4-byte aligned.
+    size_t capacity = static_cast<size_t>(file_size.QuadPart);
+    buffer_.reset(new int[capacity / 4 + 1]);
+    char* data = reinterpret_cast<char*>(buffer_.get());
+    size_t used = 0;
+    while (used < capacity) {
+      DWORD len;
+      DWORD request =
+          static_cast<DWORD>(std::min<size_t>(capacity - used, 1 << 30));
+      if (!::ReadFile(f, data + used, request, &len, NULL)) {
+        CloseHandle(f);
+        errno = EIO;
+        return false;
+      }
+      if (len == 0)
+        break;
+      used += len;
+    }
+    CloseHandle(f);
+    data_ = data;
+    size_ = used;
+    return true;
+#endif
   }
 
   const char* data() const { return data_; }
