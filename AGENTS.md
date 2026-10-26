@@ -218,6 +218,18 @@ exec). (Timelines like this came from a copy of the tree with timestamps
 printed at those points, and phases of CPU time from `perf record -g` of
 `ninja -n` runs, grouped by the function they're under.)
 
+On Windows (GitHub's 4-vCPU runners, `win-timeline` branch), a run is
+CPU-bound too: ~600-900 ms of CPU (user + kernel) in ~170-260 ms, 80-90%
+of the cores. The early stats gate the scan: the stat cache lists ~3000
+directories (136k entries, nearly all needed) in ~350-450 ms of CPU,
+mostly per directory (~80 us each, opening it; <1 us per entry); waiting
+for another thread's listing (~30 ms) and the lookups (~40 ms) are
+small. More threads for the early stats don't help (no waiting to
+hide), nor did cheaper listings (wide functions, FIND_FIRST_EX_LARGE_FETCH,
+ASCII names lowercased directly). Timeline on arm64 (ms, GN): main ~9,
+deps log read ~50, its nodes created ~65, early stats done ~200, scan
+done ~245, command started ~255 (CreateProcess ~10).
+
 Tried without gain (or worse): starting the early stats right after reading
 the deps log (they compete with the loads), urgent ParallelFor helpers,
 spinning thread-pool workers, io_uring statx (much more CPU),
