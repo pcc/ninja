@@ -315,17 +315,21 @@ graph):
 | stat() via directory handles   |    50 |   31.8 |
 
 Windows (`benchmark-windows.yml`, GitHub's 4-vCPU runners, the default
-tree; no manifest cache there), median ms, upstream -> this branch:
+tree; no manifest cache there), median ms, upstream -> this branch, each
+row from one run of the workflow (the runners vary: upstream's times
+moved by 40% between runs on x64):
 
 | Change                         | x64 GN | x64 CMake | arm64 GN | arm64 CMake |
 |--------------------------------|-------:|----------:|---------:|------------:|
 | (all of the above)             | 1175 -> 1024 | 1275 -> 1009 | 1749 -> 2852 | 1790 -> 2820 |
+| thread-safe stat cache         | 1343 -> 356 | 1431 -> 333 | 1812 -> 410 | 1938 -> 404 |
+| NEON with MSVC (arm64)         | 1896 -> 524 | 1948 -> 465 | 1738 -> 385 | 1809 -> 354 |
 
-On a 10-target tree, ~25 / ~30 ms for upstream (x64 / arm64), and this
-branch was 0-4 / 7-9 ms slower. The early stats were bypassing the stat
-cache with a GetFileAttributesEx() per file; that's the next commit
-(not measured on Windows yet). The arm64 numbers are also without the
-NEON code (char_scan.h didn't recognize MSVC's _M_ARM64 then).
+Before the stat cache change, the early stats bypassed the cache with a
+GetFileAttributesEx() per file; and char_scan.h didn't recognize
+MSVC's _M_ARM64, so arm64 used the scalar code. On a 10-target tree
+(before both), ~25 / ~30 ms for upstream (x64 / arm64), and this branch
+was 0-4 / 7-9 ms slower.
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat
