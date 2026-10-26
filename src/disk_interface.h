@@ -20,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 #include "timestamp.h"
 
@@ -172,7 +173,8 @@ struct RealDiskInterface : public DiskInterface {
   /// Whether long paths are enabled.
   bool long_paths_enabled_;
 
-  typedef std::map<std::string, TimeStamp> DirCache;
+  /// The mtimes of a directory's files, by lowercase name.
+  typedef std::unordered_map<std::string, TimeStamp> DirCache;
   /// A directory's files, listed once (by the first thread that needs it).
   struct CachedDir {
     std::once_flag listed;
@@ -180,11 +182,14 @@ struct RealDiskInterface : public DiskInterface {
     std::string err;
     DirCache files;
   };
-  // TODO: Neither a map nor a hashmap seems ideal here.  If the statcache
-  // works out, come up with a better data structure.
-  typedef std::map<std::string, std::unique_ptr<CachedDir>> Cache;
-  mutable Cache cache_;
-  mutable std::mutex cache_mutex_;
+  /// The directories, by lowercase path, in shards that are locked
+  /// separately.
+  struct CacheShard {
+    std::mutex mutex;
+    std::unordered_map<std::string, std::unique_ptr<CachedDir>> dirs;
+  };
+  static constexpr size_t kCacheShards = 64;
+  mutable std::unique_ptr<CacheShard[]> cache_;
 #endif
 };
 

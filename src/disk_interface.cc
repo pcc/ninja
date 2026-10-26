@@ -133,7 +133,8 @@ bool IsWindows7OrLater() {
       &version_info, VER_MAJORVERSION | VER_MINORVERSION, comparison);
 }
 
-bool StatAllFilesInDir(const string& dir, map<string, TimeStamp>* stamps,
+bool StatAllFilesInDir(const string& dir,
+                       std::unordered_map<string, TimeStamp>* stamps,
                        string* err) {
   // FindExInfoBasic is 30% faster than FindExInfoStandard.
   static bool can_use_basic_info = IsWindows7OrLater();
@@ -209,7 +210,8 @@ bool DiskInterface::MakeDirs(const string& path) {
 // RealDiskInterface -----------------------------------------------------------
 RealDiskInterface::RealDiskInterface()
 #ifdef _WIN32
-: use_cache_(false), long_paths_enabled_(false) {
+: use_cache_(false), long_paths_enabled_(false),
+  cache_(new CacheShard[kCacheShards]) {
   // Probe ntdll.dll for RtlAreLongPathsEnabled, and call it if it exists.
   HINSTANCE ntdll_lib = ::GetModuleHandleW(L"ntdll");
   if (ntdll_lib) {
@@ -353,38 +355,55 @@ TimeStamp RealDiskInterface::Stat(const string& path, string* err) const {
   if (!use_cache_)
     return StatSingleFile(path, err);
 
-  string dir = DirName(path);
-  string base(path.substr(dir.size() ? dir.size() + 1 : 0));
-  if (base == "..") {
+  // Split the path as DirName() does, without copies: the directory is
+  // path[0, dir_size), the file path[base_pos, ...).
+  size_t dir_size = 0;
+  size_t slash = path.find_last_of("\\/");
+  if (slash != string::npos) {
+    dir_size = slash;
+    while (dir_size > 0 && (path[dir_size - 1] == '/' ||
+                            path[dir_size - 1] == '\\'))
+      --dir_size;
+  }
+  size_t base_pos = dir_size ? dir_size + 1 : 0;
+  const char* base = path.c_str() + base_pos;
+  size_t base_size = path.size() - base_pos;
+  if (path.compare(base_pos, string::npos, "..") == 0) {
     // StatAllFilesInDir does not report any information for base = "..".
     base = ".";
-    dir = path;
+    base_size = 1;
+    dir_size = path.size();
   }
 
-  string dir_lowercase = dir;
-  auto to_lower = [](unsigned char c) {
-    return static_cast<char>(::tolower(c));
+  // The lowercase names, in buffers that the thread reuses.
+  thread_local std::string dir_key, base_key;
+  auto assign_lower = [](std::string* out, const char* s, size_t size) {
+    out->resize(size);
+    for (size_t i = 0; i < size; ++i)
+      (*out)[i] = static_cast<char>(::tolower(static_cast<unsigned char>(s[i])));
   };
-  transform(dir.begin(), dir.end(), dir_lowercase.begin(), to_lower);
-  transform(base.begin(), base.end(), base.begin(), to_lower);
+  assign_lower(&dir_key, path.data(), dir_size);
+  assign_lower(&base_key, base, base_size);
 
+  CacheShard& shard = cache_[std::hash<std::string>()(dir_key) % kCacheShards];
   CachedDir* cached;
   {
-    std::lock_guard<std::mutex> lock(cache_mutex_);
-    std::unique_ptr<CachedDir>& entry = cache_[dir_lowercase];
+    std::lock_guard<std::mutex> lock(shard.mutex);
+    std::unique_ptr<CachedDir>& entry = shard.dirs[dir_key];
     if (!entry)
       entry.reset(new CachedDir);
     cached = entry.get();
   }
   std::call_once(cached->listed, [&] {
-    cached->ok = StatAllFilesInDir(dir.empty() ? "." : dir, &cached->files,
-                                   &cached->err);
+    cached->ok = StatAllFilesInDir(
+        dir_size ? path.substr(0, dir_size) : ".", &cached->files,
+        &cached->err);
   });
   if (!cached->ok) {
     *err = cached->err;
     return -1;
   }
-  DirCache::const_iterator di = cached->files.find(base);
+  DirCache::const_iterator di = cached->files.find(base_key);
   return di != cached->files.end() ? di->second : 0;
 #else
 #ifdef __USE_LARGEFILE64
@@ -775,8 +794,10 @@ int RealDiskInterface::RemoveFile(const string& path) {
 void RealDiskInterface::AllowStatCache(bool allow) {
 #ifdef _WIN32
   use_cache_ = allow;
-  if (!allow)
-    cache_.clear();
+  if (!allow) {
+    for (size_t i = 0; i < kCacheShards; ++i)
+      cache_[i].dirs.clear();
+  }
 #endif
 }
 
