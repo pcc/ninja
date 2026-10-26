@@ -17,8 +17,9 @@
 // fakecc [-MF depfile] [-c source] -o output [ignored args...]
 //
 // - If $BENCH_STAMP is set and names a file that does not exist yet, the
-//   CLOCK_MONOTONIC time at which this process started is written to it (so
-//   the first command of a build records its start time).
+//   CLOCK_MONOTONIC (on Windows, QueryPerformanceCounter()) time at which this
+//   process started is written to it, in nanoseconds (so the first command of
+//   a build records its start time).
 // - If -c and -MF are given, the source file is read and every line of the
 //   form '#include "path"' contributes 'path' to the depfile, in the format
 //   that clang/gcc -MMD would write.
@@ -28,12 +29,32 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+#define open _open
+#define write _write
+#define close _close
+#else
 #include <time.h>
 #include <unistd.h>
+#endif
 
 static void Stamp(void) {
+#ifdef _WIN32
+  // The same clock as ttfc's (QueryPerformanceCounter(), in nanoseconds).
+  LARGE_INTEGER count, frequency;
+  QueryPerformanceCounter(&count);
+  QueryPerformanceFrequency(&frequency);
+  long long now =
+      (long long)(count.QuadPart / frequency.QuadPart) * 1000000000LL +
+      (long long)(count.QuadPart % frequency.QuadPart) * 1000000000LL /
+          frequency.QuadPart;
+#else
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
+  long long now = (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+#endif
   const char* stamp = getenv("BENCH_STAMP");
   if (!stamp)
     return;
@@ -41,8 +62,7 @@ static void Stamp(void) {
   if (fd < 0)
     return;
   char buf[64];
-  int len = snprintf(buf, sizeof(buf), "%lld\n",
-                     (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec);
+  int len = snprintf(buf, sizeof(buf), "%lld\n", now);
   if (write(fd, buf, len) != len)
     perror("write");
   close(fd);

@@ -1,0 +1,89 @@
+name: Benchmark (Windows)
+
+# Time to first command (misc/bench) of this commit against a reference
+# commit, on Windows x64 and arm64.  Run manually.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reference:
+        description: 'Reference commit (e.g. upstream ninja)'
+        default: '3ccb227'
+      targets:
+        description: 'Targets in the generated tree (gen_bench.py --targets)'
+        default: '2000'
+      rounds:
+        description: 'Rounds of 5 runs per binary (compare.py --rounds)'
+        default: '8'
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - os: windows-latest
+          arch: x64
+        - os: windows-11-arm
+          arch: arm64
+
+    env:
+      REFERENCE: ${{ inputs.reference }}
+      TARGETS: ${{ inputs.targets }}
+      ROUNDS: ${{ inputs.rounds }}
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+
+    # cl for the benchmark tools.
+    - uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: ${{ matrix.arch }}
+
+    - name: Build ninja
+      shell: bash
+      run: |
+        cmake -Bbuild -A ${{ matrix.arch }}
+        cmake --build build --parallel --config Release
+        git worktree add "$RUNNER_TEMP/reference" "$REFERENCE"
+        cmake -S "$RUNNER_TEMP/reference" -B "$RUNNER_TEMP/reference/build" \
+          -A ${{ matrix.arch }}
+        cmake --build "$RUNNER_TEMP/reference/build" --parallel --config Release
+
+    # A tree for each binary, since their log formats differ.
+    - name: Set up the benchmark trees
+      shell: bash
+      run: |
+        python misc/bench/bench.py setup --targets "$TARGETS" \
+          --ninja "$RUNNER_TEMP/reference/build/Release/ninja.exe" \
+          "$RUNNER_TEMP/bench-ref"
+        python misc/bench/bench.py setup --targets "$TARGETS" \
+          --ninja build/Release/ninja.exe "$RUNNER_TEMP/bench"
+
+    - name: Compare
+      shell: bash
+      run: |
+        {
+          echo "### ${{ matrix.arch }}: A = $REFERENCE, B = $(git rev-parse --short HEAD)"
+          for dir in out/Default out/CMake; do
+            echo
+            echo "$dir:"
+            echo '```'
+            python misc/bench/compare.py --rounds "$ROUNDS" --build-dir $dir \
+              --b-dir "$RUNNER_TEMP/bench" "$RUNNER_TEMP/bench-ref" \
+              "$RUNNER_TEMP/reference/build/Release/ninja.exe" \
+              build/Release/ninja.exe
+            python misc/bench/bench.py run -n 1 --build-dir $dir \
+              --ninja build/Release/ninja.exe "$RUNNER_TEMP/bench" |
+              grep floor || true
+            echo '```'
+          done
+        } | tee -a "$GITHUB_STEP_SUMMARY"

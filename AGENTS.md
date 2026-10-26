@@ -69,6 +69,17 @@ The CMake build links ninja statically on Linux when it can (NINJA_STATIC;
 needs `dnf install glibc-static libstdc++-static`, done on both machines):
 that saves 2-4 ms of process startup.
 
+Windows: `.github/workflows/benchmark-windows.yml` (run manually, with a
+reference commit, a tree size and a number of rounds) does the same on
+GitHub's Windows x64 and arm64 runners and compares the reference with the
+commit, each in a tree of its own (`compare.py --b-dir`), in the job
+summary. There, `bench.py` builds the tools with cl and generates the tree
+with `gen_bench.py --windows` (commands as GN and CMake write them for
+Windows: response files, `cmd /c` where a shell is needed), and the
+floor is spawning fakecc directly (`spawn-floor`). The manifest cache
+isn't used on Windows (no FileStatus); the tools also work under wine
+(mingw builds), but it's far too slow to say much.
+
 Machines used:
 - arm64: this VM, Apple M2 Max, 12 vCPUs, 16 GB RAM.
 - x86-64: `ssh x86` companion VM, AMD EPYC, 16 vCPUs, 16 GB RAM. Copy the
@@ -135,7 +146,8 @@ Machines used:
   still loaded (DepsLog::StartEarlyStats, one task per thread, chunks of 256
   re-queued so other tasks interleave). Results stay in per-id arrays; Prefetch() applies them
   (DepsLog::TakeEarlyStat). RebuildManifest() forgets them before running
-  any command.
+  any command. On Windows, they are waited for before the (not
+  thread-safe) stat cache is enabled.
 - `BindingEnv` stores bindings as (key, value) StringPieces in a small
   vector (indexed once there are more than 16); the parser adds literal
   values as views into the manifest text, which `State::manifest_contents_`

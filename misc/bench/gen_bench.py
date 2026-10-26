@@ -16,7 +16,7 @@
 """Generates a large, realistic (GN/Chromium-shaped) build tree.
 
 Usage:
-  gen_bench.py [--targets N] [--seed S] rootdir
+  gen_bench.py [--targets N] [--seed S] [--windows] rootdir
 
 Writes:
   rootdir/<dir>/*.cc, *.h, BUILD.gn       sources, headers and "build files"
@@ -34,6 +34,11 @@ Writes:
 Every compile step uses deps=gcc depfiles (written by fakecc from the
 '#include' lines in the source), so a built tree has a large .ninja_deps.
 The output is deterministic for a given seed.
+
+With --windows, the commands are the ones that run on Windows, where ninja
+starts them without a shell: fakecc.exe for everything (with response files
+where the command line would get too long), and cmd.exe where GN and CMake
+use it.
 """
 
 import argparse
@@ -167,6 +172,19 @@ CFLAGS_CC = ('-Wno-undefined-bool-conversion -Wno-tautological-undefined-compare
              '-fvisibility-inlines-hidden')
 
 
+def fakecc(windows: bool) -> str:
+    """The path of the fake compiler in commands."""
+    # cmd.exe needs backslashes.
+    return '..\\..\\tools\\fakecc.exe' if windows else '../../tools/fakecc'
+
+
+def fail_command(windows: bool) -> str:
+    """A command for steps that must not run."""
+    if windows:
+        return 'cmd /c "echo regeneration should not run && exit 1"'
+    return 'echo regeneration should not run && false'
+
+
 def write(path: str, content: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w') as f:
@@ -205,8 +223,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--targets', type=int, default=2000)
     parser.add_argument('--seed', type=int, default=1)
+    parser.add_argument('--windows', action='store_true')
     parser.add_argument('root')
     args = parser.parse_args()
+    windows = args.windows
     random.seed(args.seed)
     root = args.root
     out = os.path.join(root, 'out/Default')
@@ -252,7 +272,11 @@ def main() -> None:
         exes.append(e)
     all_targets = targets + exes
 
-    # Sources and headers.
+    # Sources and headers.  (Targets in a directory may share sources.)
+    compiled_by: Dict[str, int] = {}
+    for t in all_targets:
+        for s in t.sources:
+            compiled_by[t.src(s)] = compiled_by.get(t.src(s), 0) + 1
     for t in all_targets:
         sysset = core + random.sample(rest, 80)
         own = [t.hdr(s) for s in t.sources]
@@ -260,7 +284,8 @@ def main() -> None:
             incs = list(sysset)
             incs += random.sample(own, min(len(own), 8))
             incs += t.inc_set
-            if t.action:
+            # Only the target's own compiles wait for its generated header.
+            if t.action and compiled_by[t.src(s)] == 1:
                 incs.append(t.action)
             write(os.path.join(out, t.hdr(s)), '')
             write(os.path.join(out, t.src(s)),
@@ -282,10 +307,10 @@ def main() -> None:
                 t.dir.replace('/', '_'), t.name)
             lines += [
                 'rule %s' % rule,
-                '  command = ../../tools/fakecc ../../build/write_buildflag_header.py '
+                '  command = %s ../../build/write_buildflag_header.py '
                 '--output ${out} --rulename //%s:%s_buildflags --gen-dir gen '
                 '--definitions __%s_buildflags.rsp -o ${out}' % (
-                    t.dir, t.name, t.name),
+                    fakecc(windows), t.dir, t.name, t.name),
                 '  description = ACTION //%s:%s_buildflags(//build/toolchain/'
                 'linux:x64)' % (t.dir, t.name),
                 '  restat = 1',
@@ -353,7 +378,21 @@ def main() -> None:
         write(os.path.join(out, 'obj', t.dir, t.name + '.ninja'),
               '\n'.join(lines))
 
-    tool = '../../tools/fakecc'
+    tool = fakecc(windows)
+    if windows:
+        alink = '%s --ar ${arflags} -o ${out} @${rspfile}' % tool
+        # The libraries go in the response file too: Windows command lines
+        # are limited to 32k characters.
+        link_libs = ''
+        link_rsp = '${in} ${solibs}'
+        stamp = '%s -o ${out}' % tool
+        copy = 'cmd /c copy /y ${in} ${out} >nul'
+    else:
+        alink = 'rm -f ${out} && %s --ar ${arflags} -o ${out} @\"${rspfile}\"' % tool
+        link_libs = '${solibs} '
+        link_rsp = '${in}'
+        stamp = 'touch ${out}'
+        copy = 'ln -f ${in} ${out} 2>/dev/null || (rm -rf ${out} && cp -af ${in} ${out})'
     toolchain = [
         'rule cc',
         '  command = %s -MMD -MF ${out}.d ${defines} ${include_dirs} ${cflags} '
@@ -368,8 +407,7 @@ def main() -> None:
         '  depfile = ${out}.d',
         '  deps = gcc',
         'rule alink',
-        '  command = rm -f ${out} && %s --ar ${arflags} -o ${out} @\"${rspfile}\"'
-        % tool,
+        '  command = ' + alink,
         '  description = AR ${out}',
         '  rspfile = ${out}.rsp',
         '  rspfile_content = ${in}',
@@ -377,18 +415,17 @@ def main() -> None:
         '  command = %s --link ${ldflags} -o \"${output_dir}/${target_output_name}'
         '${output_extension}\" -Wl,--start-group @\"${output_dir}/'
         '${target_output_name}${output_extension}.rsp\" -Wl,--end-group '
-        '${solibs} ${libs}' % tool,
+        '%s${libs}' % (tool, link_libs),
         '  description = LINK ${output_dir}/${target_output_name}'
         '${output_extension}',
         '  rspfile = ${output_dir}/${target_output_name}${output_extension}.rsp',
-        '  rspfile_content = ${in}',
+        '  rspfile_content = ' + link_rsp,
         '  pool = link_pool',
         'rule stamp',
-        '  command = touch ${out}',
+        '  command = ' + stamp,
         '  description = STAMP ${out}',
         'rule copy',
-        '  command = ln -f ${in} ${out} 2>/dev/null || (rm -rf ${out} && cp -af '
-        '${in} ${out})',
+        '  command = ' + copy,
         '  description = COPY ${in} ${out}',
         '',
         'pool link_pool',
@@ -403,7 +440,7 @@ def main() -> None:
         'ninja_required_version = 1.7.2',
         '',
         'rule gn',
-        '  command = echo regeneration should not run && false',
+        '  command = ' + fail_command(windows),
         '  pool = console',
         '  description = Regenerating ninja files',
         '',
@@ -442,7 +479,7 @@ def main() -> None:
     # gn writes this last, so that the generator step is clean.
     write(os.path.join(out, 'build.ninja.stamp'), '')
 
-    write_cmake_style(root, targets, exes, transitive)
+    write_cmake_style(root, targets, exes, transitive, windows)
 
     # A good file to touch: a source in a mid-level library.
     t = targets[len(targets) // 2]
@@ -453,13 +490,25 @@ def main() -> None:
 
 
 def write_cmake_style(root: str, targets: List[Target], exes: List[Target],
-                      transitive) -> None:
+                      transitive, windows: bool) -> None:
     """Writes the same build in out/CMake, the way CMake would: one large
     build.ninja (including a rules.ninja with rules per target), with the
     compile flags as bindings of each edge."""
     out = os.path.join(root, 'out/CMake')
-    tool = '../../tools/fakecc'
+    tool = fakecc(windows)
     all_targets = targets + exes
+    # CMake runs the commands with several parts through cmd.exe on Windows.
+    if windows:
+        def shell(command: str) -> str:
+            return 'cmd.exe /C "%s"' % command
+        no_op = 'cd .'
+        ninja = 'ninja.exe'
+    else:
+        def shell(command: str) -> str:
+            return command
+        no_op = ':'
+        ninja = '/usr/bin/ninja'
+
 
     def lib(t: Target) -> str:
         return 'lib/lib%s.a' % t.name if t.kind != 'executable' else \
@@ -487,37 +536,52 @@ def write_cmake_style(root: str, targets: List[Target], exes: List[Target],
         if t.kind == 'executable':
             rules += [
                 'rule CXX_EXECUTABLE_LINKER__%s_Release' % t.name,
-                '  command = $PRE_LINK && %s $FLAGS $LINK_FLAGS @$RSP_FILE '
-                '-o $TARGET_FILE $LINK_PATH && $POST_BUILD' % tool,
+                '  command = ' + shell(
+                    '$PRE_LINK && %s $FLAGS $LINK_FLAGS @$RSP_FILE '
+                    '-o $TARGET_FILE $LINK_PATH && $POST_BUILD' % tool),
                 '  description = Linking CXX executable $TARGET_FILE',
                 '  rspfile = $RSP_FILE',
                 '  rspfile_content = $in_newline $LINK_LIBRARIES',
                 '',
             ]
         else:
-            rules += [
-                'rule CXX_STATIC_LIBRARY_LINKER__%s_Release' % t.name,
-                '  command = $PRE_LINK && rm -f $TARGET_FILE && %s -o '
-                '$TARGET_FILE $LINK_FLAGS $in && $POST_BUILD' % tool,
-                '  description = Linking CXX static library $TARGET_FILE',
-                '',
-            ]
+            if windows:
+                # The objects go in a response file (cmd.exe command lines
+                # are limited to 8k characters).
+                rules += [
+                    'rule CXX_STATIC_LIBRARY_LINKER__%s_Release' % t.name,
+                    '  command = ' + shell(
+                        '$PRE_LINK && %s -o $TARGET_FILE $LINK_FLAGS '
+                        '@$RSP_FILE && $POST_BUILD' % tool),
+                    '  description = Linking CXX static library $TARGET_FILE',
+                    '  rspfile = $RSP_FILE',
+                    '  rspfile_content = $in',
+                    '',
+                ]
+            else:
+                rules += [
+                    'rule CXX_STATIC_LIBRARY_LINKER__%s_Release' % t.name,
+                    '  command = $PRE_LINK && rm -f $TARGET_FILE && %s -o '
+                    '$TARGET_FILE $LINK_FLAGS $in && $POST_BUILD' % tool,
+                    '  description = Linking CXX static library $TARGET_FILE',
+                    '',
+                ]
     rules += [
         'rule CUSTOM_COMMAND',
         '  command = $COMMAND',
         '  description = $DESC',
         '',
         'rule RERUN_CMAKE',
-        '  command = echo regeneration should not run && false',
+        '  command = ' + fail_command(windows),
         '  description = Re-running CMake...',
         '  generator = 1',
         '',
         'rule CLEAN',
-        '  command = /usr/bin/ninja $FILE_ARG -t clean $TARGETS',
+        '  command = %s $FILE_ARG -t clean $TARGETS' % ninja,
         '  description = Cleaning all built files...',
         '',
         'rule HELP',
-        '  command = /usr/bin/ninja -t targets',
+        '  command = %s -t targets' % ninja,
         '  description = All primary targets available:',
         '',
     ]
@@ -537,8 +601,9 @@ def write_cmake_style(root: str, targets: List[Target], exes: List[Target],
         if t.action:
             b += ['build %s: CUSTOM_COMMAND ../../build/write_buildflag_header.py'
                   % t.action,
-                  '  COMMAND = cd . && %s ../../build/write_buildflag_header.py '
-                  '--output %s -o %s' % (tool, t.action, t.action),
+                  '  COMMAND = ' + shell(
+                      'cd . && %s ../../build/write_buildflag_header.py '
+                      '--output %s -o %s' % (tool, t.action, t.action)),
                   '  DESC = Generating %s' % t.action,
                   '  restat = 1', '']
             order_deps.append(t.action)
@@ -568,8 +633,8 @@ def write_cmake_style(root: str, targets: List[Target], exes: List[Target],
                   '  LINK_FLAGS = -Wl,--gc-sections',
                   '  LINK_LIBRARIES = ' + libs + ' -lpthread -ldl',
                   '  OBJECT_DIR = ' + obj_dir(t),
-                  '  POST_BUILD = :',
-                  '  PRE_LINK = :',
+                  '  POST_BUILD = ' + no_op,
+                  '  PRE_LINK = ' + no_op,
                   '  TARGET_FILE = ' + lib(t),
                   '  TARGET_PDB = %s.dbg' % t.name,
                   '  RSP_FILE = CMakeFiles/%s.rsp' % t.name, '']
@@ -579,10 +644,12 @@ def write_cmake_style(root: str, targets: List[Target], exes: List[Target],
                    ' '.join(lib(d) for d in t.deps) or order),
                   '  LANGUAGE_COMPILE_FLAGS = -O3 -DNDEBUG',
                   '  OBJECT_DIR = ' + obj_dir(t),
-                  '  POST_BUILD = :',
-                  '  PRE_LINK = :',
+                  '  POST_BUILD = ' + no_op,
+                  '  PRE_LINK = ' + no_op,
                   '  TARGET_FILE = ' + lib(t),
-                  '  TARGET_PDB = %s.a.dbg' % t.name, '']
+                  '  TARGET_PDB = %s.a.dbg' % t.name] + (
+                      ['  RSP_FILE = CMakeFiles/%s.a.rsp' % t.name]
+                      if windows else []) + ['']
         b += ['build %s: phony %s' % (t.name, lib(t)), '']
     cmake_lists = ['../../CMakeLists.txt'] + [
         '../../%s/CMakeLists.txt' % d

@@ -15,19 +15,21 @@
 
 """Compares two ninja binaries on a benchmark tree (see bench.py).
 
-  compare.py [--rounds N] [--build-dir D] [--cpu] DIR NINJA_A NINJA_B
+  compare.py [--rounds N] [--build-dir D] [--cpu] [--b-dir DIR_B] DIR
+             NINJA_A NINJA_B
 
 Runs the binaries alternately (A B A B ...), 5 runs at a time, since the
 noise between batches is larger than the differences of interest, and
 prints the median, 25th percentile and minimum time to first command of
 each.  With --cpu, measures the CPU time (user + system) of 'ninja -n'
-runs instead, which is less noisy on machines that are short of cores.
+runs instead, which is less noisy on machines that are short of cores (not
+on Windows).  With --b-dir, B runs in a tree of its own (set up with B),
+for binaries whose log formats differ.
 """
 
 import argparse
 import os
 import re
-import resource
 import statistics
 import subprocess
 import sys
@@ -44,6 +46,7 @@ def ttfc_runs(root, build_dir, ninja, runs):
 
 
 def cpu_runs(root, build_dir, ninja, runs):
+    import resource  # Not on Windows.
     out_dir = os.path.join(root, build_dir)
     # The file to touch is relative to the build directory.
     touch = os.path.join(out_dir,
@@ -65,17 +68,19 @@ def main():
     parser.add_argument('--rounds', type=int, default=8)
     parser.add_argument('--build-dir', default='out/Default')
     parser.add_argument('--cpu', action='store_true')
+    parser.add_argument('--b-dir', help='a tree of its own for B (e.g. when '
+                        'the binaries use different log formats)')
     parser.add_argument('dir')
     parser.add_argument('a')
     parser.add_argument('b')
     args = parser.parse_args()
-    root = os.path.abspath(args.dir)
+    roots = [os.path.abspath(args.dir), os.path.abspath(args.b_dir or args.dir)]
     binaries = [os.path.abspath(args.a), os.path.abspath(args.b)]
     measure = cpu_runs if args.cpu else ttfc_runs
     results = [[], []]
     for _ in range(args.rounds):
         for i, ninja in enumerate(binaries):
-            results[i] += measure(root, args.build_dir, ninja, 5)
+            results[i] += measure(roots[i], args.build_dir, ninja, 5)
     what = 'cpu' if args.cpu else 'ttfc'
     for name, times in zip('AB', results):
         times.sort()

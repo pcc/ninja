@@ -16,9 +16,10 @@
 """Time-to-first-command benchmark driver.
 
   bench.py setup [--targets N] [--ninja PATH] DIR
-      Generates the build tree in DIR (see gen_bench.py), builds the helper
-      tools and does a full build with the given ninja, producing
-      .ninja_log and .ninja_deps in the format of that ninja.
+      Generates the build tree in DIR (see gen_bench.py, with --windows on
+      Windows), builds the helper tools (with $CC, or cl on Windows) and does
+      a full build with the given ninja, producing .ninja_log and .ninja_deps
+      in the format of that ninja.
 
   bench.py rebuild [--ninja PATH] DIR
       Redoes only the full build (for when the log formats changed).
@@ -37,13 +38,22 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+WINDOWS = os.name == 'nt'
+EXE = '.exe' if WINDOWS else ''
+
+
 def build_tools(root: str) -> None:
     tools = os.path.join(root, 'tools')
     os.makedirs(tools, exist_ok=True)
-    cc = os.environ.get('CC', 'cc')
+    cc = os.environ.get('CC', 'cl' if WINDOWS else 'cc')
     for t in ['fakecc', 'ttfc']:
-        subprocess.check_call([cc, '-O2', '-o', os.path.join(tools, t),
-                               os.path.join(HERE, t + '.c')])
+        output = os.path.join(tools, t + EXE)
+        source = os.path.join(HERE, t + '.c')
+        if os.path.basename(cc).lower() in ('cl', 'cl.exe'):
+            subprocess.check_call([cc, '/nologo', '/O2', '/Fe' + output,
+                                   '/Fo' + output + '.obj', source])
+        else:
+            subprocess.check_call([cc, '-O2', '-o', output, source])
 
 
 def full_build(root: str, ninja: str, build_dir: str) -> None:
@@ -76,14 +86,16 @@ def main() -> None:
     parser.add_argument('extra', nargs='*')
     args = parser.parse_args()
     root = os.path.abspath(args.dir)
-    ninja = os.path.abspath(args.ninja) if os.sep in args.ninja else args.ninja
+    ninja = os.path.abspath(args.ninja) if os.path.dirname(args.ninja) \
+        else args.ninja
 
     if args.cmd == 'setup':
         if os.path.exists(root):
             shutil.rmtree(root)
         subprocess.check_call([sys.executable, os.path.join(HERE,
                                'gen_bench.py'), '--targets',
-                               str(args.targets), root])
+                               str(args.targets), root] +
+                              (['--windows'] if WINDOWS else []))
         build_tools(root)
         full_build(root, ninja, 'out/Default')
         full_build(root, ninja, 'out/CMake')
@@ -94,8 +106,9 @@ def main() -> None:
         out = os.path.join(root, args.build_dir)
         touch = open(os.path.join(root, 'touch_file')).read().strip()
         sys.exit(subprocess.call(
-            [os.path.join(root, 'tools/ttfc'), '-n', str(args.runs),
-             '-C', out, '-t', touch, '-f', os.path.join(root, 'tools/fakecc'),
+            [os.path.join(root, 'tools', 'ttfc' + EXE), '-n', str(args.runs),
+             '-C', out, '-t', touch,
+             '-f', os.path.join(root, 'tools', 'fakecc' + EXE),
              '--', ninja] + args.extra))
 
 
