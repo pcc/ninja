@@ -520,6 +520,35 @@ FileStatus StatusFromStat(const struct stat& st) {
 }  // namespace
 #endif
 
+#ifdef _WIN32
+namespace {
+/// Nanoseconds since 1970 (like the POSIX times), from 100 ns units since
+/// 1601.
+int64_t NanosecondsFromFileTime(const LARGE_INTEGER& time) {
+  return (time.QuadPart - 116444736000000000LL) * 100;
+}
+
+/// The status of an open file, and whether it is a regular file.
+bool StatusFromHandle(HANDLE handle, FileStatus* status, bool* regular) {
+  BY_HANDLE_FILE_INFORMATION info;
+  FILE_BASIC_INFO basic;
+  if (!GetFileInformationByHandle(handle, &info) ||
+      !GetFileInformationByHandleEx(handle, FileBasicInfo, &basic,
+                                    sizeof(basic)))
+    return false;
+  status->dev = info.dwVolumeSerialNumber;
+  status->ino = (uint64_t)info.nFileIndexHigh << 32 | info.nFileIndexLow;
+  status->size = (uint64_t)info.nFileSizeHigh << 32 | info.nFileSizeLow;
+  status->mtime = NanosecondsFromFileTime(basic.LastWriteTime);
+  // The time of the last change of the file or its metadata.
+  status->ctime = NanosecondsFromFileTime(basic.ChangeTime);
+  *regular = !(info.dwFileAttributes &
+               (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE));
+  return true;
+}
+}  // namespace
+#endif
+
 // static
 bool FileStatus::Get(const std::string& path, FileStatus* status) {
 #ifndef _WIN32
@@ -529,7 +558,16 @@ bool FileStatus::Get(const std::string& path, FileStatus* status) {
   *status = StatusFromStat(st);
   return true;
 #else
-  return false;
+  HANDLE handle = CreateFileA(
+      path.c_str(), FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  if (handle == INVALID_HANDLE_VALUE)
+    return false;
+  bool regular;
+  bool ok = StatusFromHandle(handle, status, &regular);
+  CloseHandle(handle);
+  return ok;
 #endif
 }
 
@@ -616,7 +654,56 @@ FileReader::Status RealDiskInterface::LoadFile(const std::string& path,
   close(fd);
   return Okay;
 #else
-  return FileReader::LoadFile(path, padding, contents, err);
+  // As ::ReadFile() does, but into the string directly, and with the
+  // file's status.
+  contents->path = path;
+  HANDLE f = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+                         OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+  if (f == INVALID_HANDLE_VALUE) {
+    err->assign(GetLastErrorString());
+    return NotFound;
+  }
+  FileStatus status;
+  bool regular = false;
+  bool has_status = StatusFromHandle(f, &status, &regular);
+  // One more byte than expected, to see the end of the file in one read.
+  std::string& storage = contents->storage;
+  size_t used = 0;
+  size_t capacity = (has_status ? static_cast<size_t>(status.size) : 0) + 1;
+  storage.reserve(capacity + padding);
+  storage.resize(capacity);
+  for (;;) {
+    if (used == capacity) {
+      capacity += 64 << 10;
+      storage.resize(capacity);
+    }
+    DWORD len;
+    DWORD request = static_cast<DWORD>(
+        std::min<size_t>(capacity - used, 1 << 30));
+    if (!::ReadFile(f, &storage[used], request, &len, NULL)) {
+      err->assign(GetLastErrorString());
+      storage.clear();
+      CloseHandle(f);
+      return OtherError;
+    }
+    if (len == 0)
+      break;
+    used += len;
+  }
+  storage.resize(used);
+  contents->size = used;
+  storage.append(padding, '\0');
+  contents->data = storage.data();
+  // The status is only useful if the file didn't change while being read.
+  FileStatus after;
+  bool after_regular;
+  if (has_status && regular && StatusFromHandle(f, &after, &after_regular) &&
+      after == status) {
+    contents->has_status = true;
+    contents->status = status;
+  }
+  CloseHandle(f);
+  return Okay;
 #endif
 }
 

@@ -24,6 +24,10 @@
 #include <memory>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "build_log.h"
 #include "disk_interface.h"
 #include "eval_env.h"
@@ -496,8 +500,20 @@ bool ManifestCache::Save(const std::string& path,
   }
   bool ok = fwrite(w.out.data(), 1, w.out.size(), f) == w.out.size();
   ok = fclose(f) == 0 && ok;
-  if (!ok || rename(temp_path.c_str(), path.c_str()) != 0) {
+  if (!ok) {
     *err = strerror(errno);
+    platformAwareUnlink(temp_path.c_str());
+    return false;
+  }
+#ifdef _WIN32
+  // (rename() doesn't replace existing files there.)
+  if (!MoveFileExA(temp_path.c_str(), path.c_str(),
+                   MOVEFILE_REPLACE_EXISTING)) {
+    *err = GetLastErrorString();
+#else
+  if (rename(temp_path.c_str(), path.c_str()) != 0) {
+    *err = strerror(errno);
+#endif
     platformAwareUnlink(temp_path.c_str());
     return false;
   }

@@ -76,9 +76,8 @@ commit, each in a tree of its own (`compare.py --b-dir`), in the job
 summary. There, `bench.py` builds the tools with cl and generates the tree
 with `gen_bench.py --windows` (commands as GN and CMake write them for
 Windows: response files, `cmd /c` where a shell is needed), and the
-floor is spawning fakecc directly (`spawn-floor`). The manifest cache
-isn't used on Windows (no FileStatus); the tools also work under wine
-(mingw builds), but it's far too slow to say much.
+floor is spawning fakecc directly (`spawn-floor`). The tools also work
+under wine (mingw builds), but it's far too slow to say much.
 
 Machines used:
 - arm64: this VM, Apple M2 Max, 12 vCPUs, 16 GB RAM.
@@ -163,7 +162,9 @@ Machines used:
   the logs, only without builddir and not for tools): after a parse without
   warnings, the graph (nodes, scopes, rules, pools, edges, defaults) is
   saved with the status (dev, ino, size, mtime, ctime) of every manifest
-  file; it's used while they all have the same status. Files changed less
+  file (on Windows: volume serial number, file index, size, last write
+  and change times, from a handle); it's used while they all have the
+  same status. Files changed less
   than 2 s before saving make it skip saving (timestamp granularity).
   Records are fixed-size arrays used in place (checked in parallel first;
   nodes have their path hash and their in/out edges, so they're connected
@@ -315,7 +316,7 @@ graph):
 | stat() via directory handles   |    50 |   31.8 |
 
 Windows (`benchmark-windows.yml`, GitHub's 4-vCPU runners, the default
-tree; no manifest cache there), median ms, upstream -> this branch, each
+tree), median ms, upstream -> this branch, each
 row from one run of the workflow (the runners vary: upstream's times
 moved by 40% between runs on x64):
 
@@ -324,6 +325,7 @@ moved by 40% between runs on x64):
 | (all of the above)             | 1175 -> 1024 | 1275 -> 1009 | 1749 -> 2852 | 1790 -> 2820 |
 | thread-safe stat cache         | 1343 -> 356 | 1431 -> 333 | 1812 -> 410 | 1938 -> 404 |
 | NEON with MSVC (arm64)         | 1896 -> 524 | 1948 -> 465 | 1738 -> 385 | 1809 -> 354 |
+| manifest cache on Windows      |        |           |          |             |
 
 Before the stat cache change, the early stats bypassed the cache with a
 GetFileAttributesEx() per file; and char_scan.h didn't recognize

@@ -14,13 +14,12 @@
 
 #include "manifest_cache.h"
 
-// The cache needs the status of files (see FileStatus), which is only
-// implemented on POSIX systems.
-#ifndef _WIN32
-
 #include <stdlib.h>
-#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#else
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <map>
@@ -213,7 +212,7 @@ TEST_F(ManifestCacheTest, RoundTrip) {
 "y = from-include\n"
 "build inc.o: cc inc.c\n"
 "  y = $y-edge\n"));
-  ASSERT_EQ(0, mkdir("sub", 0777));
+  ASSERT_TRUE(RealDiskInterface().MakeDir("sub"));
   ASSERT_TRUE(WriteFile("sub/build.ninja",
 "a = sub\n"
 "rule cc\n"
@@ -330,7 +329,7 @@ TEST_F(ManifestCacheTest, RecentChange) {
   ASSERT_TRUE(parser.Load("build.ninja", &err)) << err;
   EXPECT_FALSE(ManifestCache::Save(kCachePath, "build.ninja",
                                    ManifestParserOptions(), parsed, &err));
-  EXPECT_EQ(-1, access(kCachePath, F_OK));
+  EXPECT_EQ(0, disk.Stat(kCachePath, &err));
 }
 
 TEST_F(ManifestCacheTest, Corrupt) {
@@ -360,5 +359,3 @@ TEST_F(ManifestCacheTest, Corrupt) {
 }
 
 }  // anonymous namespace
-
-#endif  // _WIN32
