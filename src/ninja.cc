@@ -369,6 +369,7 @@ bool NinjaMain::RebuildManifest(const char* input_file, string* err,
 
   // Commands may change files that were stat()ed already.
   deps_log_.ForgetEarlyStats();
+  disk_interface_.AllowStatCache(false);
   disk_interface_.UseDirectoryHandles(false);
   if (builder.Build(err) != ExitSuccess)
     return false;
@@ -1558,8 +1559,9 @@ bool WarningEnable(const string& name, Options* options) {
 
 void NinjaMain::StartLoadingLogs() {
   // Until commands run (that could replace directories), the many stat()s of
-  // loading and scanning can be relative to directory handles.
+  // loading and scanning can be relative to directory handles, or cached.
   disk_interface_.UseDirectoryHandles(true);
+  disk_interface_.AllowStatCache(g_experimental_statcache);
   speculative_logs_.reset(new SpeculativeLogs);
   SpeculativeLogs* logs = speculative_logs_.get();
   logs->tasks.Run([logs] {
@@ -1826,12 +1828,7 @@ ExitStatus NinjaMain::RunBuild(int argc, char** argv, Status* status) {
     return ExitFailure;
   }
 
-#ifdef _WIN32
-  // The stat cache is not thread-safe: the deps log's early stats, which
-  // don't use it, must be done first.
-  if (g_experimental_statcache)
-    deps_log_.WaitForEarlyStats();
-#endif
+  // (Again, if the manifest was rebuilt but not changed.)
   disk_interface_.AllowStatCache(g_experimental_statcache);
 
   // Setup jobserver pool and client if needed.
@@ -2109,6 +2106,7 @@ NORETURN void real_main(int argc, char** argv) {
 
     if (options.tool && options.tool->when == Tool::RUN_AFTER_LOGS) {
       ninja.deps_log_.ForgetEarlyStats();
+      ninja.disk_interface_.AllowStatCache(false);
       ninja.disk_interface_.UseDirectoryHandles(false);
       exit((ninja.*options.tool->func)(&options, argc, argv));
     }

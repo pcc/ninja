@@ -337,14 +337,6 @@ void RealDiskInterface::UseDirectoryHandles(bool use) {
 #endif
 }
 
-bool RealDiskInterface::IsStatThreadSafe() const {
-#ifdef _WIN32
-  return !use_cache_;
-#else
-  return true;
-#endif
-}
-
 TimeStamp RealDiskInterface::Stat(const string& path, string* err) const {
   METRIC_RECORD("node stat");
 #ifdef _WIN32
@@ -376,16 +368,24 @@ TimeStamp RealDiskInterface::Stat(const string& path, string* err) const {
   transform(dir.begin(), dir.end(), dir_lowercase.begin(), to_lower);
   transform(base.begin(), base.end(), base.begin(), to_lower);
 
-  Cache::iterator ci = cache_.find(dir_lowercase);
-  if (ci == cache_.end()) {
-    ci = cache_.insert(make_pair(dir_lowercase, DirCache())).first;
-    if (!StatAllFilesInDir(dir.empty() ? "." : dir, &ci->second, err)) {
-      cache_.erase(ci);
-      return -1;
-    }
+  CachedDir* cached;
+  {
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    std::unique_ptr<CachedDir>& entry = cache_[dir_lowercase];
+    if (!entry)
+      entry.reset(new CachedDir);
+    cached = entry.get();
   }
-  DirCache::iterator di = ci->second.find(base);
-  return di != ci->second.end() ? di->second : 0;
+  std::call_once(cached->listed, [&] {
+    cached->ok = StatAllFilesInDir(dir.empty() ? "." : dir, &cached->files,
+                                   &cached->err);
+  });
+  if (!cached->ok) {
+    *err = cached->err;
+    return -1;
+  }
+  DirCache::const_iterator di = cached->files.find(base);
+  return di != cached->files.end() ? di->second : 0;
 #else
 #ifdef __USE_LARGEFILE64
   struct stat64 st;
@@ -688,7 +688,7 @@ int RealDiskInterface::RemoveFile(const string& path) {
 void RealDiskInterface::AllowStatCache(bool allow) {
 #ifdef _WIN32
   use_cache_ = allow;
-  if (!use_cache_)
+  if (!allow)
     cache_.clear();
 #endif
 }

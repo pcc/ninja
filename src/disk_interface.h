@@ -15,8 +15,10 @@
 #ifndef NINJA_DISK_INTERFACE_H_
 #define NINJA_DISK_INTERFACE_H_
 
+#include <atomic>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "timestamp.h"
@@ -129,7 +131,7 @@ struct RealDiskInterface : public DiskInterface {
   RealDiskInterface();
   virtual ~RealDiskInterface();
   TimeStamp Stat(const std::string& path, std::string* err) const override;
-  bool IsStatThreadSafe() const override;
+  bool IsStatThreadSafe() const override { return true; }
   bool IsReadFileThreadSafe() const override { return true; }
   Status LoadFile(const std::string& path, size_t padding,
                   FileContents* contents, std::string* err) override;
@@ -140,7 +142,10 @@ struct RealDiskInterface : public DiskInterface {
                   std::string* err) override;
   int RemoveFile(const std::string& path) override;
 
-  /// Whether stat information can be cached.  Only has an effect on Windows.
+  /// Whether stat information can be cached (per directory: listing one
+  /// gives the information of all its files), which is only right while no
+  /// command runs.  Not while Stat() is called on other threads.  Only has
+  /// an effect on Windows.
   void AllowStatCache(bool allow);
 
   /// Whether Stat() may look up files relative to handles of their
@@ -162,16 +167,24 @@ struct RealDiskInterface : public DiskInterface {
   std::unique_ptr<DirectoryHandles> directory_handles_;
 #ifdef _WIN32
   /// Whether stat information can be cached.
-  bool use_cache_;
+  std::atomic<bool> use_cache_;
 
   /// Whether long paths are enabled.
   bool long_paths_enabled_;
 
   typedef std::map<std::string, TimeStamp> DirCache;
+  /// A directory's files, listed once (by the first thread that needs it).
+  struct CachedDir {
+    std::once_flag listed;
+    bool ok = false;
+    std::string err;
+    DirCache files;
+  };
   // TODO: Neither a map nor a hashmap seems ideal here.  If the statcache
   // works out, come up with a better data structure.
-  typedef std::map<std::string, DirCache> Cache;
+  typedef std::map<std::string, std::unique_ptr<CachedDir>> Cache;
   mutable Cache cache_;
+  mutable std::mutex cache_mutex_;
 #endif
 };
 

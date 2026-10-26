@@ -145,9 +145,16 @@ Machines used:
 - The deps log's nodes are stat()ed on other threads while the manifest is
   still loaded (DepsLog::StartEarlyStats, one task per thread, chunks of 256
   re-queued so other tasks interleave). Results stay in per-id arrays; Prefetch() applies them
-  (DepsLog::TakeEarlyStat). RebuildManifest() forgets them before running
-  any command. On Windows, they are waited for before the (not
-  thread-safe) stat cache is enabled.
+  (DepsLog::TakeEarlyStat). Before any command runs or a tool starts,
+  ForgetEarlyStats() stops them (and waits for those in progress), since
+  the directory handles and the stat cache go away then.
+- On Windows, Stat() uses ninja's stat cache (one FindFirstFileEx()
+  listing per directory, `-d nostatcache` turns it off) from the start
+  (with the directory handles), and it's thread-safe (a directory is
+  listed by the first thread that needs it), so the early stats and the
+  prefetch use it too. (Before, the early stats did a
+  GetFileAttributesEx() per file, which presumably costs much more than
+  a stat() on Linux: the Windows runs were slow, most of all on arm64.)
 - `BindingEnv` stores bindings as (key, value) StringPieces in a small
   vector (indexed once there are more than 16); the parser adds literal
   values as views into the manifest text, which `State::manifest_contents_`
@@ -306,6 +313,19 @@ graph):
 | simple commands without /bin/sh|    52 |     35 |
 | rules made in parallel (cache) |    46 |   32.8 |
 | stat() via directory handles   |    50 |   31.8 |
+
+Windows (`benchmark-windows.yml`, GitHub's 4-vCPU runners, the default
+tree; no manifest cache there), median ms, upstream -> this branch:
+
+| Change                         | x64 GN | x64 CMake | arm64 GN | arm64 CMake |
+|--------------------------------|-------:|----------:|---------:|------------:|
+| (all of the above)             | 1175 -> 1024 | 1275 -> 1009 | 1749 -> 2852 | 1790 -> 2820 |
+
+On a 10-target tree, ~25 / ~30 ms for upstream (x64 / arm64), and this
+branch was 0-4 / 7-9 ms slower. The early stats were bypassing the stat
+cache with a GetFileAttributesEx() per file; that's the next commit
+(not measured on Windows yet). The arm64 numbers are also without the
+NEON code (char_scan.h didn't recognize MSVC's _M_ARM64 then).
 
 Baseline breakdown (`ninja -d stats -n`, arm64 / x86-64 ms): manifest parse
 ~180 / 121, `.ninja_log` load 14 / 10, `.ninja_deps` load 72 / 65, node stat
