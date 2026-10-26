@@ -795,8 +795,11 @@ void RealDiskInterface::AllowStatCache(bool allow) {
 #ifdef _WIN32
   use_cache_ = allow;
   if (!allow) {
-    for (size_t i = 0; i < kCacheShards; ++i)
-      cache_[i].dirs.clear();
+    // Freeing the cache (~130k names for big builds) takes a while, and
+    // happens right before commands run: on another thread.
+    CacheShard* cache = cache_.release();
+    cache_.reset(new CacheShard[kCacheShards]);
+    RunDetached([cache] { delete[] cache; });
   }
 #endif
 }
