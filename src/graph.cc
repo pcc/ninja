@@ -396,6 +396,7 @@ void DependencyScan::Prefetch(Node* initial_node) {
   // Nothing reads this until the prefetch is done.
   for (Edge* edge : edges)
     edge->scan_bindings_.valid = true;
+  TimelineMark("prefetch: edges collected");
 
   // stat() a node (if not known yet), on the thread that claimed it.
   auto stat = [this](Node* node) {
@@ -485,6 +486,7 @@ void DependencyScan::Prefetch(Node* initial_node) {
       for (size_t id = begin; id < end; ++id)
         stat_id(static_cast<int>(id));
     });
+    TimelineMark("prefetch: all deps-log ids stat()ed");
   }
   // Then each id's mtime, or kFlagged if it isn't a leaf that was stat()ed
   // and is clean: the summaries take the slow path for those.
@@ -501,6 +503,7 @@ void DependencyScan::Prefetch(Node* initial_node) {
     });
   }
   const int epoch = dyndep_epoch_;
+  TimelineMark("prefetch: id ranks");
 
   ParallelFor(edges.size(), 16, [&](size_t begin, size_t end) {
     for (size_t i = begin; i < end; ++i) {

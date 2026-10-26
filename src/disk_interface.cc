@@ -39,6 +39,8 @@
 #include <unordered_map>
 #endif
 
+#include <chrono>
+
 #include "hash_map.h"
 #include "metrics.h"
 #include "thread_pool.h"
@@ -374,9 +376,54 @@ void RealDiskInterface::UseDirectoryHandles(bool use) {
 #endif
 }
 
+#ifdef _WIN32
+namespace {
+// Diagnostics (win-timeline).
+std::atomic<int64_t> g_stat_calls{0}, g_stat_ns{0}, g_list_dirs{0},
+    g_list_entries{0}, g_list_ns{0}, g_once_ns{0}, g_lock_ns{0};
+int64_t SteadyNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+}  // namespace
+
+void PrintStatCacheCounters() {
+  if (!getenv("NINJA_TIMELINE"))
+    return;
+  fprintf(stderr,
+          "stat counters: %lld Stat() calls, %.1f ms in them (all threads), "
+          "%lld directories listed with %lld entries in %.1f ms; "
+          "%.1f ms in call_once() (incl. listing and waiting for it), "
+          "%.1f ms for the shard locks and lookups of directories\n",
+          (long long)g_stat_calls.load(), g_stat_ns.load() / 1e6,
+          (long long)g_list_dirs.load(), (long long)g_list_entries.load(),
+          g_list_ns.load() / 1e6, g_once_ns.load() / 1e6,
+          g_lock_ns.load() / 1e6);
+  FILETIME creation, exit_time, kernel, user;
+  if (GetProcessTimes(GetCurrentProcess(), &creation, &exit_time, &kernel,
+                      &user)) {
+    auto ms = [](const FILETIME& t) {
+      return ((uint64_t)t.dwHighDateTime << 32 | t.dwLowDateTime) / 1e4;
+    };
+    fprintf(stderr, "cpu counters: user %.1f ms, kernel %.1f ms\n",
+            ms(user), ms(kernel));
+  }
+}
+#else
+void PrintStatCacheCounters() {}
+#endif
+
 TimeStamp RealDiskInterface::Stat(const string& path, string* err) const {
   METRIC_RECORD("node stat");
 #ifdef _WIN32
+  struct Count {
+    int64_t start;
+    ~Count() {
+      g_stat_calls.fetch_add(1, std::memory_order_relaxed);
+      g_stat_ns.fetch_add(SteadyNs() - start, std::memory_order_relaxed);
+    }
+  } count{SteadyNs()};
   // MSDN: "Naming Files, Paths, and Namespaces"
   // http://msdn.microsoft.com/en-us/library/windows/desktop/aa365247(v=vs.85).aspx
   if (!path.empty() && !AreLongPathsEnabled() && path[0] != '\\' &&
@@ -422,6 +469,7 @@ TimeStamp RealDiskInterface::Stat(const string& path, string* err) const {
 
   CacheShard& shard = cache_[std::hash<std::string>()(dir_key) % kCacheShards];
   CachedDir* cached;
+  int64_t lock_start = SteadyNs();
   {
     std::lock_guard<std::mutex> lock(shard.mutex);
     std::unique_ptr<CachedDir>& entry = shard.dirs[dir_key];
@@ -429,11 +477,18 @@ TimeStamp RealDiskInterface::Stat(const string& path, string* err) const {
       entry.reset(new CachedDir);
     cached = entry.get();
   }
+  int64_t once_start = SteadyNs();
+  g_lock_ns.fetch_add(once_start - lock_start, std::memory_order_relaxed);
   std::call_once(cached->listed, [&] {
+    int64_t list_start = SteadyNs();
     cached->ok = StatAllFilesInDir(
         dir_size ? path.substr(0, dir_size) : ".", &cached->files,
         &cached->err);
+    g_list_ns.fetch_add(SteadyNs() - list_start);
+    g_list_dirs.fetch_add(1);
+    g_list_entries.fetch_add(static_cast<int64_t>(cached->files.size()));
   });
+  g_once_ns.fetch_add(SteadyNs() - once_start, std::memory_order_relaxed);
   if (!cached->ok) {
     *err = cached->err;
     return -1;

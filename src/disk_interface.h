@@ -127,6 +127,9 @@ struct DiskInterface: public FileReader {
   bool MakeDirs(const std::string& path);
 };
 
+/// Diagnostics (win-timeline): print counters of the Windows stat cache.
+void PrintStatCacheCounters();
+
 /// Implementation of DiskInterface that actually hits the disk.
 struct RealDiskInterface : public DiskInterface {
   RealDiskInterface();

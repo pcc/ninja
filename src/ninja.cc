@@ -1567,15 +1567,19 @@ void NinjaMain::StartLoadingLogs() {
   logs->tasks.Run([logs] {
     logs->build_log_status = logs->build_log.Load(
         ".ninja_log", &logs->build_log_err, /*may_modify=*/false);
+    TimelineMark("build log loaded");
   });
   // While the manifest is parsed, create the nodes for the deps log, stat()
   // them, and load the log, if that has no side effects.  This assumes that
   // the log is at the default location: if not, OpenDepsLog() undoes it.
   logs->tasks.Run([this, logs] {
     logs->deps_log = DepsLog::Read(".ninja_deps");
+    TimelineMark("deps log read");
     DepsLog::CreateNodes(logs->deps_log.get(), &state_);
+    TimelineMark("deps log nodes created");
     DepsLog::StartEarlyStats(logs->deps_log.get(), &disk_interface_);
     logs->deps_log_loaded = deps_log_.LoadWithoutSideEffects(&logs->deps_log);
+    TimelineMark("deps log loaded");
   });
 }
 
@@ -1830,6 +1834,7 @@ ExitStatus NinjaMain::RunBuild(int argc, char** argv, Status* status) {
 
   // (Again, if the manifest was rebuilt but not changed.)
   disk_interface_.AllowStatCache(g_experimental_statcache);
+  TimelineMark("RunBuild");
 
   // Setup jobserver pool and client if needed.
   JobserverState jobserver_state(config_, status);
@@ -1854,10 +1859,13 @@ ExitStatus NinjaMain::RunBuild(int argc, char** argv, Status* status) {
     }
   }
 
+  TimelineMark("targets added");
   // Make sure restat rules do not see stale timestamps.
   deps_log_.ForgetEarlyStats();
+  TimelineMark("early stats stopped");
   disk_interface_.AllowStatCache(false);
   disk_interface_.UseDirectoryHandles(false);
+  TimelineMark("stat cache off");
 
   if (builder.AlreadyUpToDate()) {
     if (config_.verbosity != BuildConfig::NO_STATUS_UPDATE) {
@@ -2084,6 +2092,7 @@ NORETURN void real_main(int argc, char** argv) {
     if (!use_cache || !ManifestCache::Load(kManifestCachePath,
                                            options.input_file, parser_opts,
                                            &ninja.state_)) {
+      TimelineMark("manifest cache not used");
       if (!parser.Load(options.input_file, &err)) {
         status->Error("%s", err.c_str());
         exit(1);
@@ -2095,6 +2104,7 @@ NORETURN void real_main(int argc, char** argv) {
                             parser_opts, ninja.state_, &err);
     }
 
+    TimelineMark("manifest loaded");
     if (options.tool && options.tool->when == Tool::RUN_AFTER_LOAD)
       exit((ninja.*options.tool->func)(&options, argc, argv));
 
@@ -2103,6 +2113,7 @@ NORETURN void real_main(int argc, char** argv) {
 
     if (!ninja.OpenBuildLog() || !ninja.OpenDepsLog())
       exit(1);
+    TimelineMark("logs opened");
 
     if (options.tool && options.tool->when == Tool::RUN_AFTER_LOGS) {
       ninja.deps_log_.ForgetEarlyStats();
@@ -2123,6 +2134,7 @@ NORETURN void real_main(int argc, char** argv) {
       status->Error("rebuilding '%s': %s", options.input_file, err.c_str());
       exit(1);
     }
+    TimelineMark("manifest up to date");
 
     // If enable_jobserver_pool is set to 1, enable jobserver pool mode as
     // if --jobserver-pool had been passed on the command line. Note that
@@ -2149,6 +2161,7 @@ NORETURN void real_main(int argc, char** argv) {
 }  // anonymous namespace
 
 int main(int argc, char** argv) {
+  TimelineMark("main");
 #ifdef __GLIBC__
   // Ninja allocates a lot of memory on many threads at once when loading.
   // By default, glibc grows the heaps a few pages at a time, each time with

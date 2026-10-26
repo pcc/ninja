@@ -6,15 +6,9 @@ name: Benchmark (Windows)
 on:
   workflow_dispatch:
     inputs:
-      reference:
-        description: 'Reference commit (e.g. upstream ninja)'
-        default: '3ccb227'
       targets:
         description: 'Targets in the generated tree (gen_bench.py --targets)'
         default: '2000'
-      rounds:
-        description: 'Rounds of 5 runs per binary (compare.py --rounds)'
-        default: '8'
 
 permissions:
   contents: read
@@ -33,9 +27,7 @@ jobs:
           arch: arm64
 
     env:
-      REFERENCE: ${{ inputs.reference }}
       TARGETS: ${{ inputs.targets }}
-      ROUNDS: ${{ inputs.rounds }}
 
     steps:
     - uses: actions/checkout@v7
@@ -53,37 +45,46 @@ jobs:
       run: |
         cmake -Bbuild -A ${{ matrix.arch }}
         cmake --build build --parallel --config Release
-        git worktree add "$RUNNER_TEMP/reference" "$REFERENCE"
-        cmake -S "$RUNNER_TEMP/reference" -B "$RUNNER_TEMP/reference/build" \
-          -A ${{ matrix.arch }}
-        cmake --build "$RUNNER_TEMP/reference/build" --parallel --config Release
 
-    # A tree for each binary, since their log formats differ.
-    - name: Set up the benchmark trees
+    - name: Set up the benchmark tree
       shell: bash
       run: |
-        python misc/bench/bench.py setup --targets "$TARGETS" \
-          --ninja "$RUNNER_TEMP/reference/build/Release/ninja.exe" \
-          "$RUNNER_TEMP/bench-ref"
         python misc/bench/bench.py setup --targets "$TARGETS" \
           --ninja build/Release/ninja.exe "$RUNNER_TEMP/bench"
 
-    - name: Compare
+    # (win-timeline branch: diagnostics, not for merging.)
+    - name: Timeline
       shell: bash
       run: |
+        ninja="$PWD/build/Release/ninja.exe"
         {
-          echo "### ${{ matrix.arch }}: A = $REFERENCE, B = $(git rev-parse --short HEAD)"
+          echo "### ${{ matrix.arch }}: $(git rev-parse --short HEAD), $NUMBER_OF_PROCESSORS processors"
           for dir in out/Default out/CMake; do
+            cd "$RUNNER_TEMP/bench/$dir"
+            touch_file=$(cat ../../touch_file)
             echo
             echo "$dir:"
             echo '```'
-            python misc/bench/compare.py --rounds "$ROUNDS" --build-dir $dir \
-              --b-dir "$RUNNER_TEMP/bench" "$RUNNER_TEMP/bench-ref" \
-              "$RUNNER_TEMP/reference/build/Release/ninja.exe" \
-              build/Release/ninja.exe
-            python misc/bench/bench.py run -n 1 --build-dir $dir \
-              --ninja build/Release/ninja.exe "$RUNNER_TEMP/bench" |
-              grep floor || true
+            for i in 1 2 3 4 5 6; do
+              touch "$touch_file"
+              echo "run $i:"
+              NINJA_TIMELINE=1 "$ninja" 2>&1 >/dev/null | grep -E "timeline|counters" || true
+            done
+            for extra in 4 12; do
+              for i in 1 2 3; do
+                touch "$touch_file"
+                echo "NINJA_EXTRA_STAT_THREADS=$extra, run $i:"
+                NINJA_EXTRA_STAT_THREADS=$extra NINJA_TIMELINE=1 "$ninja" 2>&1 >/dev/null | grep -E "timeline|counters" || true
+              done
+            done
+            touch "$touch_file"
+            echo "-d nostatcache:"
+            NINJA_TIMELINE=1 "$ninja" -d nostatcache 2>&1 >/dev/null | grep -E "timeline|counters" || true
+            touch "$touch_file"
+            echo "-d stats -n:"
+            "$ninja" -d stats -n | grep -v '^\['
+            "$ninja" >/dev/null
             echo '```'
+            cd - >/dev/null
           done
         } | tee -a "$GITHUB_STEP_SUMMARY"

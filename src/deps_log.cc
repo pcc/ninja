@@ -18,6 +18,7 @@
 #include <errno.h>
 
 #include <algorithm>
+#include <thread>
 #include <atomic>
 #include <stdint.h>
 #include <stdio.h>
@@ -284,15 +285,30 @@ struct DepsLog::EarlyStats {
   ~EarlyStats() {
     cancel.store(true, std::memory_order_relaxed);
     tasks.Wait();
+    JoinExtraThreads();
+  }
+
+  /// Diagnostics (win-timeline): $NINJA_EXTRA_STAT_THREADS more threads
+  /// that only stat().
+  std::vector<std::thread> extra_threads;
+  void JoinExtraThreads() {
+    for (std::thread& thread : extra_threads)
+      if (thread.joinable())
+        thread.join();
   }
 
   /// stat() the next chunk of nodes, then queue the rest, so that other
   /// tasks (parsing the manifest) get to run in between.
   void StatSome() {
+    if (StatChunk())
+      tasks.Run([this] { StatSome(); });
+  }
+
+  bool StatChunk() {
     const size_t kChunk = 256;
     size_t begin = next.fetch_add(kChunk, std::memory_order_relaxed);
     if (begin >= nodes.size() || cancel.load(std::memory_order_relaxed))
-      return;
+      return false;
     size_t end = std::min(begin + kChunk, nodes.size());
     for (size_t id = begin; id < end; ++id) {
       uint8_t s = kNone;
@@ -303,7 +319,9 @@ struct DepsLog::EarlyStats {
       mtimes[id] = disk_interface->Stat(nodes[id]->path(), &err);
       states[id].store(kDone, std::memory_order_release);
     }
-    tasks.Run([this] { StatSome(); });
+    if (done.fetch_add(end - begin) + (end - begin) == nodes.size())
+      TimelineMark("early stats done");
+    return true;
   }
 
   TimeStamp Take(int id) {
@@ -324,6 +342,7 @@ struct DepsLog::EarlyStats {
   std::unique_ptr<std::atomic<uint8_t>[]> states;
   std::unique_ptr<TimeStamp[]> mtimes;
   std::atomic<size_t> next{0};
+  std::atomic<size_t> done{0};
   std::atomic<bool> cancel{false};
   bool forgotten = false;
   TaskGroup tasks;
@@ -648,6 +667,13 @@ void DepsLog::StartEarlyStats(PendingLoad* pending,
   size_t tasks = TaskGroup::Concurrency();
   for (size_t i = 0; i < tasks; ++i)
     early->tasks.Run([early] { early->StatSome(); });
+  if (const char* extra = getenv("NINJA_EXTRA_STAT_THREADS")) {
+    for (int i = 0; i < atoi(extra); ++i)
+      early->extra_threads.emplace_back([early] {
+        while (early->StatChunk()) {
+        }
+      });
+  }
 }
 
 TimeStamp DepsLog::TakeEarlyStat(int id) {
@@ -664,6 +690,7 @@ void DepsLog::ForgetEarlyStats() {
     early_stats_->forgotten = true;
     early_stats_->cancel.store(true, std::memory_order_relaxed);
     early_stats_->tasks.Wait();
+    early_stats_->JoinExtraThreads();
   }
 }
 

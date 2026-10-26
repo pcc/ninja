@@ -61,6 +61,37 @@
 #endif
 
 #include "char_scan.h"
+
+#include <chrono>
+
+namespace {
+int64_t NowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+int64_t ProcessStartNs() {
+#ifdef _WIN32
+  FILETIME creation, exit_time, kernel, user;
+  if (GetProcessTimes(GetCurrentProcess(), &creation, &exit_time, &kernel,
+                      &user)) {
+    uint64_t t = (uint64_t)creation.dwHighDateTime << 32 |
+                 creation.dwLowDateTime;
+    return ((int64_t)t - 116444736000000000LL) * 100;
+  }
+#endif
+  return NowNs();
+}
+}  // namespace
+
+void TimelineMark(const char* label) {
+  static const bool enabled = getenv("NINJA_TIMELINE") != NULL;
+  if (!enabled)
+    return;
+  static const int64_t start = ProcessStartNs();
+  fprintf(stderr, "timeline %9.2f ms  %s\n", (NowNs() - start) / 1e6, label);
+}
 #include "edit_distance.h"
 
 using namespace std;

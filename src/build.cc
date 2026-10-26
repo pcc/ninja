@@ -699,9 +699,12 @@ Node* Builder::AddTarget(const string& name, string* err) {
 
 bool Builder::AddTarget(Node* target, string* err) {
   std::vector<Node*> validation_nodes;
+  TimelineMark("prefetch start");
   scan_.Prefetch(target);
+  TimelineMark("prefetch done");
   if (!scan_.RecomputeDirty(target, &validation_nodes, err))
     return false;
+  TimelineMark("serial scan done");
 
   Edge* in_edge = target->in_edge();
   if (!in_edge || !in_edge->outputs_ready()) {
@@ -730,6 +733,7 @@ bool Builder::AlreadyUpToDate() const {
 }
 
 ExitStatus Builder::Build(string* err) {
+  TimelineMark("Build()");
   assert(!AlreadyUpToDate());
   plan_.PrepareQueue();
 
@@ -875,6 +879,9 @@ bool Builder::StartEdge(Edge* edge, string* err) {
   METRIC_RECORD("StartEdge");
   if (edge->is_phony())
     return true;
+  static bool first = true;
+  if (first)
+    TimelineMark("starting first edge");
 
   int64_t start_time_millis = GetTimeMillis() - start_time_millis_;
   running_edges_.insert(make_pair(edge, start_time_millis));
@@ -921,7 +928,13 @@ bool Builder::StartEdge(Edge* edge, string* err) {
   }
 
   // start command computing and run it
-  if (!command_runner_->StartCommand(edge)) {
+  bool started = command_runner_->StartCommand(edge);
+  if (first) {
+    TimelineMark("first command started");
+    PrintStatCacheCounters();
+    first = false;
+  }
+  if (!started) {
     err->assign("command '" + edge->EvaluateCommand() + "' failed.");
     return false;
   }

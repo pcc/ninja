@@ -39,6 +39,10 @@
 /// Log a fatal message and exit.
 NORETURN void Fatal(const char* msg, ...);
 
+/// For diagnostics: if $NINJA_TIMELINE is set, print the time since the
+/// process started (on Windows; else since the first call) and \a label.
+void TimelineMark(const char* label);
+
 // Have a generic fall-through for different versions of C/C++.
 #if __has_cpp_attribute(fallthrough)
 #  define NINJA_FALLTHROUGH [[fallthrough]]
