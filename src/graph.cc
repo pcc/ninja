@@ -591,6 +591,36 @@ void DependencyScan::Prefetch(Node* initial_node) {
   });
 }
 
+void DependencyScan::StatManyInParallel(EdgeInputsRange range) {
+  // As in Prefetch().
+  const size_t kMinNodes = 512;
+  if (static_cast<size_t>(range.end() - range.begin()) < kMinNodes ||
+      explanations_.ptr() || !disk_interface_->IsStatThreadSafe() ||
+      TaskGroup::Concurrency() <= 1)
+    return;
+  std::vector<Node*> nodes;
+  for (Node* node : range) {
+    if (!node->status_known())
+      nodes.push_back(node);
+  }
+  // Once each.
+  std::sort(nodes.begin(), nodes.end());
+  nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
+  if (nodes.size() < kMinNodes)
+    return;
+  ParallelFor(nodes.size(), 64, [&](size_t begin, size_t end) {
+    std::string err;
+    for (size_t i = begin; i < end; ++i) {
+      Node* node = nodes[i];
+      // On errors, leave the node for RecomputeNodeDirty() to report.
+      if (node->Stat(disk_interface_, &err)) {
+        if (!node->in_edge())
+          node->set_dirty(!node->exists());
+      }
+    }
+  });
+}
+
 bool DependencyScan::RecomputeDirty(Node* initial_node,
                                     std::vector<Node*>* validation_nodes,
                                     string* err) {
@@ -838,6 +868,7 @@ bool DependencyScan::RecomputeNodeDirty(Node* node, std::vector<Node*>* stack,
       } else {
         // depfile load succeeded
         // check the recently added inputs from depfile
+        StatManyInParallel(new_deps.value());
         const Node* most_recent_input_previous = most_recent_input;
         if (!RecomputeEdgesInputsDirty(node, new_deps.value(), most_recent_input, dirty,
                                        stack, validation_nodes, err))

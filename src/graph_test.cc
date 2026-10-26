@@ -80,6 +80,50 @@ TEST_F(GraphTest, FunkyMakefilePath) {
   EXPECT_TRUE(GetNode("out.o")->dirty());
 }
 
+// Many deps in a depfile are stat()ed in parallel (the result must be the
+// same).
+TEST_F(GraphTest, ManyDepfileDeps) {
+  struct ThreadSafeFileSystem : public VirtualFileSystem {
+    bool IsStatThreadSafe() const override { return true; }
+  };
+  for (int variant = 0; variant < 3; ++variant) {
+    State state;
+    AddCatRule(&state);
+    ASSERT_NO_FATAL_FAILURE(AssertParse(&state,
+"rule catdep\n"
+"  depfile = $out.d\n"
+"  command = cat $in > $out\n"
+"build out.o: catdep foo.cc\n"));
+    ThreadSafeFileSystem fs;
+    DependencyScan scan(&state, NULL, NULL, &fs, NULL, NULL);
+    string depfile = "out.o:";
+    for (int i = 0; i < 1000; ++i) {
+      string header = "h" + to_string(i) + ".h";
+      depfile += " " + header;
+      // (Some twice.)
+      if (i % 100 == 0)
+        depfile += " " + header;
+      // A header is missing, or newer than the output, or neither.
+      if (variant != 1 || i != 567)
+        fs.Create(header, "");
+    }
+    fs.Create("foo.cc", "");
+    fs.Create("out.o.d", depfile + "\n");
+    fs.Create("out.o", "");
+    if (variant == 2) {
+      fs.Tick();
+      fs.Create("h789.h", "");
+    }
+
+    string err;
+    EXPECT_TRUE(scan.RecomputeDirty(state.LookupNode("out.o"), NULL, &err));
+    ASSERT_EQ("", err);
+    EXPECT_EQ(variant != 0, state.LookupNode("out.o")->dirty());
+    EXPECT_EQ(variant == 1, state.LookupNode("h567.h")->dirty());
+    EXPECT_TRUE(state.LookupNode("h999.h")->status_known());
+  }
+}
+
 TEST_F(GraphTest, ExplicitImplicit) {
   ASSERT_NO_FATAL_FAILURE(AssertParse(&state_,
 "rule catdep\n"

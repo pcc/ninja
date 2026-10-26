@@ -550,6 +550,11 @@ struct DependencyScan {
   bool LoadDyndeps(Node* node, DyndepFile* ddf, std::string* err) const;
 
  private:
+  /// stat() the nodes of \a range that aren't yet, in parallel if there
+  /// are many (e.g. the inputs in GN's depfile of build.ninja) and that's
+  /// possible.
+  void StatManyInParallel(EdgeInputsRange range);
+
   bool RecomputeNodeDirty(Node* node, std::vector<Node*>* stack,
                           std::vector<Node*>* validation_nodes,
                           std::string* err);
