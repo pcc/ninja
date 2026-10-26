@@ -133,6 +133,19 @@ bool IsWindows7OrLater() {
       &version_info, VER_MAJORVERSION | VER_MINORVERSION, comparison);
 }
 
+/// The name of a file as the "A" functions give it (in the code page of
+/// the file functions).
+string NarrowName(const wchar_t* name, UINT code_page) {
+  string narrow;
+  int size = WideCharToMultiByte(code_page, 0, name, -1, NULL, 0, NULL, NULL);
+  if (size > 0) {
+    narrow.resize(size);
+    WideCharToMultiByte(code_page, 0, name, -1, &narrow[0], size, NULL, NULL);
+    narrow.resize(size - 1);
+  }
+  return narrow;
+}
+
 bool StatAllFilesInDir(const string& dir,
                        std::unordered_map<string, TimeStamp>* stamps,
                        string* err) {
@@ -141,11 +154,25 @@ bool StatAllFilesInDir(const string& dir,
   // This is not in earlier SDKs.
   const FINDEX_INFO_LEVELS kFindExInfoBasic =
       static_cast<FINDEX_INFO_LEVELS>(1);
+  const DWORD kFindFirstExLargeFetch = 2;
   FINDEX_INFO_LEVELS level =
       can_use_basic_info ? kFindExInfoBasic : FindExInfoStandard;
-  WIN32_FIND_DATAA ffd;
-  HANDLE find_handle = FindFirstFileExA((dir + "\\*").c_str(), level, &ffd,
-                                        FindExSearchNameMatch, NULL, 0);
+  // The wide functions, since the "A" ones convert each name; names are
+  // converted here only if they aren't ASCII (rarely).
+  const UINT code_page = AreFileApisANSI() ? CP_ACP : CP_OEMCP;
+  string pattern = dir + "\\*";
+  std::wstring wide_pattern;
+  int size = MultiByteToWideChar(code_page, 0, pattern.c_str(), -1, NULL, 0);
+  if (size > 0) {
+    wide_pattern.resize(size);
+    MultiByteToWideChar(code_page, 0, pattern.c_str(), -1, &wide_pattern[0],
+                        size);
+  }
+  WIN32_FIND_DATAW ffd;
+  HANDLE find_handle =
+      FindFirstFileExW(wide_pattern.c_str(), level, &ffd,
+                       FindExSearchNameMatch, NULL,
+                       can_use_basic_info ? kFindFirstExLargeFetch : 0);
 
   if (find_handle == INVALID_HANDLE_VALUE) {
     DWORD win_err = GetLastError();
@@ -155,29 +182,37 @@ bool StatAllFilesInDir(const string& dir,
     *err = "FindFirstFileExA(" + dir + "): " + GetLastErrorString();
     return false;
   }
+  string lowername;
   do {
-    string lowername = ffd.cFileName;
-    if (lowername == "..") {
+    const wchar_t* name = ffd.cFileName;
+    if (name[0] == L'.' && name[1] == L'.' && name[2] == 0) {
       // Seems to just copy the timestamp for ".." from ".", which is wrong.
       // This is the case at least on NTFS under Windows 7.
       continue;
     }
 
-    transform(lowername.begin(), lowername.end(), lowername.begin(),
-              [](unsigned char c) {
-                return static_cast<char>(::tolower(c));
-              });
+    lowername.clear();
+    const wchar_t* c = name;
+    for (; *c && *c < 0x80; ++c)
+      lowername.push_back(static_cast<char>(::tolower(*c)));
+    if (*c) {
+      // Not ASCII: as the "A" functions would give it.
+      lowername = NarrowName(name, code_page);
+      transform(lowername.begin(), lowername.end(), lowername.begin(),
+                [](unsigned char c) {
+                  return static_cast<char>(::tolower(c));
+                });
+    }
 
     if (ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
       // File is a symlink, stat the linked file.
-      stamps->insert(make_pair(
-          lowername, StatSingleFile(dir + "\\" + ffd.cFileName, err)));
+      stamps->emplace(lowername, StatSingleFile(
+                                     dir + "\\" + NarrowName(name, code_page),
+                                     err));
     } else {
-      stamps->insert(
-          make_pair(lowername, TimeStampFromFileTime(ffd.ftLastWriteTime)));
+      stamps->emplace(lowername, TimeStampFromFileTime(ffd.ftLastWriteTime));
     }
-
-  } while (FindNextFileA(find_handle, &ffd));
+  } while (FindNextFileW(find_handle, &ffd));
   FindClose(find_handle);
   return true;
 }
